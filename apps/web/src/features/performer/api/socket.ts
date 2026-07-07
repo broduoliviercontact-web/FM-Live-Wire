@@ -1,4 +1,5 @@
 import { io, type Socket, type ManagerOptions, type SocketOptions } from "socket.io-client";
+import { resolveClientTransports, isProdClient } from "../../../lib/socket-client";
 
 // Story 3.1 + 3.5 — performer Socket.IO client (AD-10: token never in the URL).
 //
@@ -81,6 +82,10 @@ export function connectPerformer(
     reconnectionAttempts: RECONNECTION_ATTEMPTS,
     reconnectionDelay: RECONNECTION_DELAY,
     reconnectionDelayMax: RECONNECTION_DELAY_MAX,
+    // Story 6.8 hotfix / NFR-14: prod forces WebSocket-only so the client never
+    // opens a polling handshake the prod server rejects with 400 (Render). Mirrors
+    // the server's `resolveTransports(isProd)`; dev/test keeps polling + websocket.
+    transports: resolveClientTransports(isProdClient()),
   };
   // `io(opts)` → same-origin; `io(uri, opts)` → explicit URL. Both overloads
   // exist on socket.io-client's `lookup`.
