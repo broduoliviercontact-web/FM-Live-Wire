@@ -1,0 +1,81 @@
+# FM Live Wire — continuous integration (Story 6.4, NFR-16 / S-8).
+#
+# Gates the build on every push / PR: lint → boundaries → unit tests with
+# coverage → full build. The coverage step enforces a per-file 100 % threshold
+# on the 6 critical modules (mapping / panic / scheduler / schema /
+# ValidationService / PerformerRegistry / tokenBucket) via `vitest.config.ts`
+# (`coverage.thresholds.perFile`), so a regression on any one of them fails
+# the workflow.
+#
+# Constraints honoured (Story 6.4 scope):
+#   - NO secrets, NO deploy step.
+#   - NO MIDI hardware dependency: the whole suite runs on MockMidiOutput /
+#     fakes / jsdom (Web MIDI is mocked in the web test env). No real Chrome,
+#     no real MIDI port is required.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Cancel a superseded run on the same ref before starting the new one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # pnpm is set up BEFORE setup-node so the pnpm store path is available for
+      # the node action's `cache: pnpm` input. Version is pinned to the project's
+      # `packageManager` (package.json) for reproducible installs.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      # Build the shared package first: apps/web + apps/server import
+      # `@fmlw/shared` (workspace dependency), which resolves to its built
+      # `dist/`. The test suite + the full build both need it present.
+      - name: Build @fmlw/shared
+        run: pnpm --filter @fmlw/shared build
+
+      - name: Architecture boundaries
+        run: node scripts/verify-boundaries.mjs
+
+      # Coverage gate (Story 6.4 / NFR-16): `vitest run --coverage` with the
+      # per-file 100 % threshold configured in vitest.config.ts. Exits non-zero
+      # if ANY of the 6 critical modules drops below 100 % statements / branches
+      # / functions / lines. No MIDI device required (MockMidiOutput + fakes).
+      - name: Unit tests + coverage gate (100 % on critical modules)
+        run: pnpm test:coverage
+
+      - name: Build all packages
+        run: pnpm -r build
+
+      # Zero-secret bundle verification (Story 6.7, NFR-9 / S-7 / AD-10):
+      # scans `apps/web/dist` (produced by the previous build step) for any
+      # leaked `OWNER_SECRET` or suspect `VITE_*SECRET/TOKEN/KEY` env var.
+      # Vite inlines every `VITE_*` statically into the bundle (readable in
+      # DevTools dev+prod), so a secret env var reaching the bundle is a hard
+      # security regression. Fails the workflow if any indicator is found.
+      # No GitHub secrets, no deploy — local static scan of built artifacts.
+      - name: Zero-secret bundle verification
+        run: pnpm verify:no-secrets

@@ -1,0 +1,38 @@
+# ADR-0004 — Socket.IO v4 pour le relay temps réel
+
+- **Statut :** Accepté
+- **Date :** 2026-07-06
+- **Supersede :** aucun
+- **Liens :** PRD FR-10, FR-11, FR-18, NFR-14 ; spine AD-4 ; addendum A.2
+
+## Contexte
+
+Le MVP diffuse des événements MIDI d'un performer vers des listeners en temps réel (cible 100 ev/s soutenus, burst 200, latence perçue < ~80 ms LAN / < ~150 ms internet). Il faut : rooms (room unique `fm-live-wire:main`), reconnexion automatique, buffering de paquets pendant déconnexion, acknowledgements (ack de validation), middlewares de connexion (`io.use`) et per-event (`socket.use`), et idéalement connection state recovery.
+
+Alternatives : `ws` (WebSocket brut) est plus léger (p99 RTT ~3 ms vs ~6 ms, ~75 MB/1k connexions vs ~120 MB) mais réimplémenterait rooms, reconnexion, recovery, acks et middlewares à la main.
+
+## Decision
+
+**Socket.IO v4 (`^4.8.3`) pour le relay temps réel, client et serveur pinnés sur la même major (compat 4.x↔4.x).**
+
+- Rooms Socket.IO pour `fm-live-wire:main` (constante MVP, imposée par le serveur).
+- `io.use` (rôle + owner + token timing-safe) et `socket.use` (gate per-event + rate limit).
+- Acknowledgements : `socket.emit("midi:event", payload, ack)` → `ack({ ok, error?, issues? })`.
+- Reconnexion auto + connection state recovery (v4.6+) → reprise du flux live sans replay.
+- **Prod** : `transports: ["websocket"]` (pas de fallback long-polling, pas de sticky sessions).
+
+## Conséquences
+
+**Positives :**
+- Rooms, reconnexion, recovery, acks, middlewares gratuits.
+- Écosystème mature, ~15M dl/semaine, MIT.
+
+**Négatives :**
+- Surcoût vs `ws` nu (RTT, mémoire) — **acceptable** à l'échelle humaine (100–200 ev/s, 5–20 listeners).
+- Framing propriétaire Socket.IO (pas du WS brut) → incompatible avec clients WS non-Socket.IO. OK MVP (client contrôlé).
+
+## Alternatives considérées
+
+- **`ws` (WebSocket brut)** : rejeté MVP — réimplémenter rooms/reconnexion/recovery/acks/middlewares coûte plus que le surcoût Socket.IO à cette échelle.
+- **WebTransport (HTTP/3)** : rejeté — pertinent pour un futur « mode radio générative » basse-latence, hors MVP.
+- **Long-polling fallback en prod** : rejeté — `transports: ["websocket"]` pour éviter latence + sticky sessions.

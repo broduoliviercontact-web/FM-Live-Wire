@@ -1,0 +1,36 @@
+# FM Live Wire — Caddy reverse proxy (Story 6.8).
+#
+# Mono-domaine HTTPS (ADR-0001, AD-1, AD-13). Caddy terminates TLS (automatic
+# Let's Encrypt / ZeroSSL via the HTTP-01 challenge) and proxies to the Node
+# HTTP server on 127.0.0.1:8787. The Node app NEVER manages TLS itself (AD-1,
+# invariant 5). Same origin: the browser sees one origin (https://fmlw.example.com)
+# for both the static app and Socket.IO, so zero CORS is needed in prod.
+#
+# WebSocket upgrade is handled automatically by Caddy's `reverse_proxy` — no
+# extra directive is required.
+#
+# >>> PLACEHOLDER DOMAIN — REPLACE `fmlw.example.com` with your real domain <<<
+# before deploying. Caddy auto-issues a certificate for the real domain. Do NOT
+# hardcode a real domain or any secret in this file.
+#
+# NO SECRET HERE. OWNER_SECRET stays in the Node process environment only
+# (AD-10, invariant 10) — it is never read by Caddy and never written here.
+
+fmlw.example.com {
+	# Compress text assets (HTML/CSS/JS). Vite already minifies; this helps
+	# the SPA shell + chunked JS on slow links.
+	encode zstd gzip
+
+	# Single upstream: the Node mono-process. Caddy forwards Host + upgrades.
+	reverse_proxy 127.0.0.1:8787 {
+		header_up Host {host}
+	}
+
+	# Caddy serves its own ACME challenge on :80 automatically (managed via the
+	# `global` options / email below — uncomment and set a real email for
+	# production rate-limit + renewal notifications).
+}
+
+# {
+# 	email you@example.com
+# }

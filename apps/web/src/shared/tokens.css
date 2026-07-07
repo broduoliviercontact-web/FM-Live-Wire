@@ -1,0 +1,43 @@
+/* Story 6.2 — DESIGN.md design tokens for the "live studio" dark console.
+ *
+ * Single theme: the app is always dark (`<html class="dark">`), so the raw
+ * hex signal / base / ink / midi tokens are declared once on `:root`. The
+ * shadcn HSL slots are remapped in `.dark` (see index.css) onto these same
+ * values. These raw vars are the source of truth referenced by name in
+ * DESIGN.md — do NOT hardcode hex in components: use the utility classes
+ * (`bg-on-air`, `text-info`, `border-l-late`, `font-mono` …) or the vars.
+ *
+ * Palette is intentionally restricted and semantic (DESIGN.md "Colors"):
+ * on_air = accent / lampe, connected = sain, late = warning, danger =
+ * erreurs/bordures, danger_fill = fills portant texte blanc (Panic, AA 4.6:1),
+ * info = Mock/Debug + info technique. MIDI tones mirror the signal set.
+ */
+:root {
+  /* base */
+  --c-bg: #0A0B0D;
+  --c-surface: #121418;
+  --c-surface-2: #1A1D23;
+  --c-border: #272B33;
+  --c-border-strong: #3A3F4A;
+  /* ink */
+  --c-ink-primary: #E8EAED;
+  --c-ink-secondary: #B4B9C1;
+  --c-ink-muted: #898F98;
+  --c-ink-disabled: #4A4F57;
+  /* signal */
+  --c-on-air: #F2A93B;
+  --c-connected: #3DD68C;
+  --c-late: #F2A93B;
+  --c-danger: #FF4D4F;
+  --c-danger-fill: #E11D2E;
+  --c-info: #36BFFA;
+  /* midi */
+  --c-note-on: #3DD68C;
+  --c-note-off: #7E848D;
+  --c-cc: #36BFFA;
+  --c-program: #F2A93B;
+  --c-pitch-bend: #B98CFF;
+  /* typography */
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}

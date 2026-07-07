@@ -1,0 +1,39 @@
+# ADR-0005 — Contrat MIDI partagé Zod dans `@fmlw/shared`
+
+- **Statut :** Accepté
+- **Date :** 2026-07-06
+- **Supersede :** aucun
+- **Liens :** PRD FR-10, FR-15, FR-21, NFR-12, NFR-15 ; spine AD-5, AD-9 ; addendum A.2
+
+## Contexte
+
+Le contrat wire `midi:event` est consommé par le frontend (performer encode, listener décode) **et** le backend (validation, broadcast). Sans source unique, le schéma dérive entre les deux côtés → rejets silencieux ou acceptations de payloads incompatibles. Le MVP exige une validation stricte (rejet champs inconnus, hors-plages, `v≠1`, SysEx) identique front+back. La stack est TypeScript monorepo pnpm — un package partagé est naturel.
+
+Le wire format doit aussi être choisi : JSON compact (~80–120 B/event) vs binaire MessagePack (~3 B). À l'échelle humaine (100–200 ev/s max), le surcoût JSON est négligeable et apporte debuggability + validation Zod + logs lisibles.
+
+## Decision
+
+**Contrat `midi:event` partagé via un package `@fmlw/shared` (Zod), source unique importée front et back. Wire format JSON compact `v:1`.**
+
+- `packages/shared` contient `MidiEventSchema` (Zod) + `type MidiEvent = z.infer<typeof MidiEventSchema>` + constantes (CC, status bytes, `ROOM`).
+- Consommé via `"@fmlw/shared": "workspace:*"` dans `apps/web` et `apps/server`.
+- Schéma **strict** : rejette champs inconnus (`.strict()` en Zod 3 / `z.strictObject()` en Zod 4), hors-plages, `v !== 1` (`unsupported-version`).
+- Champs communs `v/type/channel/roomId/seq/ts` + conditionnels par type. `channel` 0–15 sur le wire (1–16 UI). `pitchBend` 14-bit 0–16383. `performerId` **interdit/ignoré** dans le payload (serveur attache `socket.id`). Pas de type SysEx (voir ADR-0008).
+- `srvTs` ajouté par le serveur au broadcast (télémétrie), sans re-loger.
+
+## Conséquences
+
+**Positives :**
+- Zéro dérive du schéma wire (un seul source).
+- Validation runtime les deux côtés ; rejet cohérent des payloads invalides.
+- Wire JSON debuggable + logs lisibles.
+
+**Négatives :**
+- Overhead JSON vs binaire — négligeable à l'échelle MVP ; binaire justifié seulement à plusieurs milliers d'ev/s (hors MVP).
+- **Zod 4 breaking** (`.strict()` déprécié → `z.strictObject()`) : à figer au scaffolding (Q-ARCH-1). Recommandation : pin Zod 3 `^3.23` MVP.
+
+## Alternatives considérées
+
+- **Binaire MessagePack** : rejeté MVP — densité non requise à l'échelle humaine ; perd debuggability + Zod direct.
+- **Schéma dupliqué front/back (TypeBox/AJV)** : rejeté — dérive garantie ; la source unique Zod est le pattern confirmé.
+- **Package partagé sans monorepo (`file:`/symlink)** : rejeté — workspace pnpm à peine plus long et évite la dérive.

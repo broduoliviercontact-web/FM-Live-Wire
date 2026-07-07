@@ -1,0 +1,78 @@
+/* Story 6.2 — DESIGN.md raw hex design tokens (signal / base / ink / midi +
+ * font families). Imported before Tailwind so the `var(--c-*)` utilities and
+ * the `.dark` HSL remap below resolve against the canonical hex values. */
+@import "./shared/tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+  }
+
+  /* Story 6.2 — "live studio" dark console. shadcn HSL slots remapped onto
+   * the DESIGN.md hex tokens (computed HSL, see tokens.css for the raw hex).
+   * primary = on_air accent, destructive = danger_fill (Panic fills, AA 4.6:1
+   * with white text), ring = on_air focus accent. */
+  .dark {
+    --background: 220 13% 5%;
+    --foreground: 215 12% 92%;
+    --card: 220 14% 8%;
+    --card-foreground: 215 12% 92%;
+    --popover: 220 15% 12%;
+    --popover-foreground: 215 12% 92%;
+    --primary: 36 88% 59%;
+    --primary-foreground: 220 13% 5%;
+    --secondary: 220 15% 12%;
+    --secondary-foreground: 215 12% 92%;
+    --muted: 220 15% 12%;
+    --muted-foreground: 216 7% 57%;
+    --accent: 220 15% 12%;
+    --accent-foreground: 215 12% 92%;
+    --destructive: 355 77% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 13% 18%;
+    --input: 220 13% 18%;
+    --ring: 36 88% 59%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+  /* Story 6.3 — global visible focus ring (AC-U18, UX-DR25). `ring` is remapped
+   * to the `on_air` amber accent in `.dark` (DESIGN.md `focus: on_air`), so every
+   * interactive control shows a consistent, visible on_air focus indicator.
+   * `:where()` keeps specificity at 0 so shadcn component-level focus rings
+   * (Button, Select, Dialog…) still win — this only fills the gap for raw
+   * focusable elements (links, the radiogroup radios, native inputs) that
+   * don't already carry their own ring. */
+  :where(a, button, [role="radio"], [role="checkbox"], [role="tab"], input, select, textarea, [tabindex]):focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}

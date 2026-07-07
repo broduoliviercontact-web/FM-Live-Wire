@@ -1,0 +1,39 @@
+# ADR-0001 — Monolithe modulaire mono-process, mono-domaine HTTPS
+
+- **Statut :** Accepté
+- **Date :** 2026-07-06
+- **Supersede :** aucun
+- **Liens :** PRD NFR-12, NFR-13, NFR-8 ; spine AD-1 ; addendum A.2
+
+## Contexte
+
+FM Live Wire MVP cible 5–20 listeners simultanés, 100 `midi:event`/s soutenus (burst 200), un seul performer/admin. La stack est fixée : React + Vite + TypeScript (front), Node + Express + Socket.IO (back), Web MIDI API native. Web MIDI exige un **secure context HTTPS** (`[SecureContext]`). La question de structure : faut-il déployer frontend et backend séparément (deux domaines / un CDN static + un backend) ou tout porter dans un seul process ?
+
+Séparer introduirait : CORS entre le static et le endpoint Socket.IO, préflight, un secure context à assurer sur deux origines, et une surface de déploiement/infra plus large pour un MVP à audience modérée. L'état serveur est en mémoire (pas de DB, pas de Redis) — aucune raison de distribuer.
+
+## Decision
+
+**Monolithe modulaire mono-process, mono-domaine HTTPS.** Un seul process Node.js porte à la fois :
+- Express — sert le build Vite statique + `GET /health` ;
+- Socket.IO — le cœur temps réel (rooms, middlewares, handlers) ;
+sur le **même origin HTTPS** (`https://fmlivewire.<tld>`).
+
+Structure modulaire en couches : HTTP layer (mince) / Socket layer (dédiée, séparée de l'HTTP) / Services (framework-indépendants) / Shared contract (`@fmlw/shared`). Frontend feature-based (`app → features → entities → shared → lib`).
+
+## Conséquences
+
+**Positives :**
+- Zéro CORS, zéro préflight ; secure context Web MIDI uniforme sur un seul origin.
+- Déploiement minimal (un process, un domaine) ; pas de Redis, pas de K8s, pas de CDN.
+- Largement au-delà du besoin (mono-process ~10k+ connexions théoriques vs 5–20 listeners).
+- État en mémoire simple ; modules isolés permettent un swap futur.
+
+**Négatives :**
+- Pas de scale-out horizontal MVP (état volatile, perte au redémarrage acceptée).
+- Une seule instance = SPOF ; acceptable pour un MVP radio à petite audience.
+
+## Alternatives considérées
+
+- **CDN static + backend séparé** : rejeté — CORS + secure context fragmenté + complexité déploiement injustifiée à cette échelle.
+- **Microservices** : rejeté — aucune besoin de distribution pour un performer + audience modérée ; tendance 2025 confirme le monolithe modulaire pour ce type de projet.
+- **Multi-instance + Redis Streams adapter dès le MVP** : rejeté — over-engineering ; isolé derrière l'interface `RelayService` pour swap futur sans rewrite (voir ADR-0006).

@@ -1,0 +1,38 @@
+# ADR-0002 — One-way broadcast, owner unique
+
+- **Statut :** Accepté
+- **Date :** 2026-07-06
+- **Supersede :** aucun
+- **Liens :** Décision produit verrouillée 2026-07-06 ; PRD FR-1..5, FR-19..24, NFR-11, NFR-20 ; spine AD-2
+
+## Contexte
+
+FM Live Wire est **verrouillé produit** comme un système à sens unique : un seul performer/admin (owner) diffuse du MIDI vers une audience de listeners read-only. Les listeners ne peuvent **jamais** envoyer de MIDI vers la performance. Pas de jam collaboratif, pas de chat MIDI bidirectionnel. Un 2ᵉ performer doit être refusé (`performer:busy`), pas de remplacement silencieux. Le MVP n'a pas d'auth JWT/RBAC — l'owner est identifié par un shared secret minimal.
+
+Le risque : sans auth forte, un listener pourrait tenter d'élever son privilège en émettant `midi:event`, ou un 2ᵉ performer pourrait prendre la main. Il faut enforce le one-way et l'owner unique **sans JWT**.
+
+## Decision
+
+**One-way broadcast + owner unique enforced par middlewares Socket.IO.**
+
+1. **`io.use` (connexion)** : stamp `socket.data.role` (`performer`|`listener`) depuis `auth.role`, et `socket.data.performerId = socket.id` (jamais une valeur client). Rôle **épinglé, non modifiable** ensuite. Si `role==="performer"`, compare `auth.token` vs `OWNER_SECRET` via `crypto.timingSafeEqual`.
+2. **`PerformerRegistry`** : `ownerPerformerId: string|null` single-slot. 1er performer validé → `ownerPerformerId = socket.id`. 2ᵉ → `next(Error("performer:busy"))` (refus, pas de remplacement). Déconnexion owner → libération.
+3. **`socket.use` (per-event)** : sur `midi:event`, accepté seulement si `role === "performer" && performerId === ownerPerformerId`. Sinon → `forbidden` + log ; **3 `forbidden` → disconnect** (pas de ban persistant MVP).
+4. **Events listener→serveur autorisés** : `room:join`, `room:leave`, `midi:test` uniquement. Aucun handler `midi:event` côté listener, aucun handler `panic` côté serveur.
+
+## Conséquences
+
+**Positives :**
+- Contrôle de rôle 100 % effectif : un listener ne peut jamais émettre un `midi:event` accepté.
+- Owner unique garanti ; 2ᵉ performer refusé clairement.
+- `performerId = socket.id` (serveur) → anti-spoofing d'identité.
+
+**Négatives :**
+- Pas de multi-performers, pas de jam — mais c'est un **non-objectif délibéré** (mode futur séparé, pas une évolution naturelle du cœur MVP).
+- Shared secret `OWNER_SECRET` (pas JWT) : acceptable MVP, à remplacer par JWT+RBAC post-traction.
+
+## Alternatives considérées
+
+- **JWT + RBAC dès le MVP** : rejeté — over-engineering ; pas de compte utilisateur MVP ; le shared secret timing-safe suffit et prépare le swap (`socket.auth` + `io.use`).
+- **Remplacement silencieux du 2ᵉ performer** : rejeté — violerait l'invariant owner unique et l'UX (`performer:busy` terminal, pas de retry).
+- **Ban persistant après `forbidden`** : rejeté MVP — simple déconnexion après 3 tentatives suffit ; pas d'infra de ban.
