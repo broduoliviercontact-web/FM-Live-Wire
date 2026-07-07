@@ -52,9 +52,12 @@ import { create } from "zustand";
 // and `eventsReceived` / `noteOnPulse` from incoming events.
 //
 // Story 5.4 — backpressure telemetry (AD-11, FR-25/26/27, UX-DR12/14):
-//   - `lastLatencyMs` : the last relay latency `srvTs - ts` (ms), or `null` when
-//                      the last event had no `srvTs`. Telemetry only (AD-11) —
-//                      `srvTs` is never re-loged.
+//   - `lastLatencyMs` : the last downstream latency `receivedAtMs - srvTs` (ms,
+//                      both epoch `Date.now()` — comparable, Story 6.8 hotfix),
+//                      or `null` when the last event had no `srvTs`. Telemetry
+//                      only (AD-11) — `srvTs` is never re-loged. The performer
+//                      `event.ts` is NOT used (cross-client `performance.now()`
+//                      is never comparable).
 //   - `lateWarning`  : a LOCAL late / overload warning is active (latency >
 //                      `MAX_LATE_MS` OR buffer overflow → drop oldest). Drives
 //                      `LateAlert` + `LatencyStat` (alerte-only, hidden by
@@ -113,7 +116,7 @@ export interface ListenerState {
    * Sticky (a stale build cannot recover without a page refresh).
    */
   readonly protocolError: boolean;
-  /** Story 5.4 — last relay latency `srvTs - ts` (ms), or `null` (no `srvTs`). */
+  /** Story 5.4 — last downstream latency `receivedAtMs - srvTs` (ms, epoch pair), or `null` (no `srvTs`). */
   readonly lastLatencyMs: number | null;
   /** Story 5.4 — LOCAL late/overload warning active (FR-27, UX-DR14). */
   readonly lateWarning: boolean;

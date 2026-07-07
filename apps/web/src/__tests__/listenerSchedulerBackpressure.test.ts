@@ -51,14 +51,21 @@ const N = (type: MidiEventType) => type; // alias to keep lines short
 
 // --- pure helpers ------------------------------------------------------------
 
-describe("computeLatencyMs — srvTs - ts (null when srvTs absent)", () => {
+describe("computeLatencyMs — receivedAtMs - srvTs (null when srvTs absent)", () => {
   it("returns null when srvTs is undefined", () => {
     expect(computeLatencyMs(undefined, 1000)).toBeNull();
   });
-  it("returns srvTs - ts", () => {
-    expect(computeLatencyMs(1200, 1000)).toBe(200);
+  it("returns receivedAtMs - srvTs (both epoch, comparable)", () => {
+    expect(computeLatencyMs(1000, 1200)).toBe(200); // received 200 ms after relay
     expect(computeLatencyMs(1000, 1000)).toBe(0);
-    expect(computeLatencyMs(999, 1000)).toBe(-1); // defensive: negative → not late
+    expect(computeLatencyMs(1100, 1000)).toBe(-100); // defensive: negative (clock skew) → not late
+  });
+  it("does NOT use the performer ts — only the epoch pair (Story 6.8 hotfix)", () => {
+    // A wild performer performance.now() (e.g. 5 ms from the performer's page
+    // load) must NOT leak into the latency: only receivedAtMs - srvTs matters.
+    // Here srvTs/receivedAtMs are epoch; the performer ts is irrelevant to this
+    // function (it is not even an argument).
+    expect(computeLatencyMs(1_783_000_000_000, 1_783_000_000_050)).toBe(50);
   });
 });
 
@@ -193,7 +200,7 @@ describe("createMidiScheduler — normal reception (lookahead path)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
     const data = new Uint8Array([0x90, 60, 100]);
-    const r = sch.schedule(out, data, { type: "noteOn", ts: 1000 }, 5000);
+    const r = sch.schedule(out, data, { type: "noteOn", receivedAtMs: 1000 }, 5000);
     expect(r.outcome).toBe("sent");
     expect(r.late).toBe(false);
     expect(r.latencyMs).toBeNull();
@@ -207,8 +214,8 @@ describe("createMidiScheduler — normal reception (lookahead path)", () => {
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
-      srvTs: 1050,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1050,
     }, 5000);
     expect(r.outcome).toBe("sent");
     expect(out.sends[0]!.ts).toBe(5040); // lookahead, not immediate
@@ -216,13 +223,13 @@ describe("createMidiScheduler — normal reception (lookahead path)", () => {
 });
 
 describe("createMidiScheduler — late fallback (noteOn / noteOff / programChange)", () => {
-  it("late noteOn (srvTs - ts = 300 > 200) → fallback IMMEDIATE send(data, now)", () => {
+  it("late noteOn (receivedAtMs - srvTs = 300 > 200) → fallback IMMEDIATE send(data, now)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
-      srvTs: 1300,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1300,
     }, 5000);
     expect(r.outcome).toBe("fallback");
     expect(r.late).toBe(true);
@@ -236,8 +243,8 @@ describe("createMidiScheduler — late fallback (noteOn / noteOff / programChang
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0x80, 60, 0]), {
       type: "noteOff",
-      srvTs: 1300,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1300,
     }, 5000);
     expect(r.outcome).toBe("fallback");
     expect(out.sends[0]!.ts).toBe(5000);
@@ -248,8 +255,8 @@ describe("createMidiScheduler — late fallback (noteOn / noteOff / programChang
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0xc0, 42]), {
       type: "programChange",
-      srvTs: 1300,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1300,
     }, 5000);
     expect(r.outcome).toBe("fallback");
     expect(out.sends).toHaveLength(1);
@@ -260,7 +267,7 @@ describe("createMidiScheduler — late fallback (noteOn / noteOff / programChang
     const sch = createMidiScheduler();
     const out = recordingOutput();
     for (const type of ["noteOn", "noteOff", "programChange"] as const) {
-      const r = sch.schedule(out, new Uint8Array([0x00]), { type, srvTs: 1300, ts: 1000 }, 0);
+      const r = sch.schedule(out, new Uint8Array([0x00]), { type, srvTs: 1000, receivedAtMs: 1300 }, 0);
       expect(r.outcome).toBe("fallback");
     }
   });
@@ -272,8 +279,8 @@ describe("createMidiScheduler — late drop (controlChange / pitchBend)", () => 
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0xb0, 74, 91]), {
       type: "controlChange",
-      srvTs: 1300,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1300,
     }, 5000);
     expect(r.outcome).toBe("dropped");
     expect(r.late).toBe(true);
@@ -285,8 +292,8 @@ describe("createMidiScheduler — late drop (controlChange / pitchBend)", () => 
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0xe0, 0, 64]), {
       type: "pitchBend",
-      srvTs: 1300,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1300,
     }, 5000);
     expect(r.outcome).toBe("dropped");
     expect(out.sends).toHaveLength(0);
@@ -296,7 +303,7 @@ describe("createMidiScheduler — late drop (controlChange / pitchBend)", () => 
     const sch = createMidiScheduler();
     const out = recordingOutput();
     for (const type of ["controlChange", "pitchBend"] as const) {
-      const r = sch.schedule(out, new Uint8Array([0x00]), { type, srvTs: 1300, ts: 1000 }, 0);
+      const r = sch.schedule(out, new Uint8Array([0x00]), { type, srvTs: 1000, receivedAtMs: 1300 }, 0);
       expect(r.outcome).toBe("dropped");
     }
   });
@@ -306,8 +313,8 @@ describe("createMidiScheduler — late drop (controlChange / pitchBend)", () => 
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0xb0, 74, 91]), {
       type: "controlChange",
-      srvTs: 1050,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1050,
     }, 5000);
     expect(r.outcome).toBe("sent");
     expect(out.sends).toHaveLength(1);
@@ -322,8 +329,8 @@ describe("createMidiScheduler — MAX_LATE_MS boundary (200 exact vs 201)", () =
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
-      srvTs: 1200,
-      ts: 1000, // latency 200 (=== MAX_LATE_MS) → not late
+      srvTs: 1000,
+      receivedAtMs: 1200, // latency 200 (=== MAX_LATE_MS) → not late
     }, 5000);
     expect(r.late).toBe(false);
     expect(r.outcome).toBe("sent");
@@ -335,8 +342,8 @@ describe("createMidiScheduler — MAX_LATE_MS boundary (200 exact vs 201)", () =
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
-      srvTs: 1201,
-      ts: 1000, // latency 201 (> MAX_LATE_MS) → late
+      srvTs: 1000,
+      receivedAtMs: 1201, // latency 201 (> MAX_LATE_MS) → late
     }, 5000);
     expect(r.late).toBe(true);
     expect(r.outcome).toBe("fallback");
@@ -348,15 +355,15 @@ describe("createMidiScheduler — MAX_LATE_MS boundary (200 exact vs 201)", () =
     const out1 = recordingOutput();
     const r1 = sch.schedule(out1, new Uint8Array([0xb0, 1, 2]), {
       type: "controlChange",
-      srvTs: 1201,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1201,
     }, 0);
     expect(r1.outcome).toBe("dropped");
     const out2 = recordingOutput();
     const r2 = sch.schedule(out2, new Uint8Array([0xb0, 1, 2]), {
       type: "controlChange",
-      srvTs: 1200,
-      ts: 1000,
+      srvTs: 1000,
+      receivedAtMs: 1200,
     }, 0);
     expect(r2.outcome).toBe("sent");
   });
@@ -373,7 +380,7 @@ describe("createMidiScheduler — bounded buffer 256 + drop oldest (FR-25)", () 
     const out = recordingOutput();
     const sch = createMidiScheduler();
     for (let i = 0; i < 256; i += 1) {
-      sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", ts: 0 }, 0);
+      sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", receivedAtMs: 0 }, 0);
     }
     expect(sch.getBufferLength()).toBe(256);
     expect(out.sends).toHaveLength(256); // all sent (calm)
@@ -383,9 +390,9 @@ describe("createMidiScheduler — bounded buffer 256 + drop oldest (FR-25)", () 
     const out = recordingOutput();
     const sch = createMidiScheduler();
     for (let i = 0; i < 256; i += 1) {
-      sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", ts: 0 }, 0);
+      sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", receivedAtMs: 0 }, 0);
     }
-    const r257 = sch.schedule(out, new Uint8Array([0x90, 61, 100]), { type: "noteOn", ts: 0 }, 0);
+    const r257 = sch.schedule(out, new Uint8Array([0x90, 61, 100]), { type: "noteOn", receivedAtMs: 0 }, 0);
     expect(r257.bufferOverflow).toBe(true);
     expect(r257.outcome).toBe("sent"); // the new event is still sent (room made)
     expect(sch.getBufferLength()).toBe(256); // bounded — did NOT grow to 257
@@ -397,7 +404,7 @@ describe("createMidiScheduler — bounded buffer 256 + drop oldest (FR-25)", () 
     const sch = createMidiScheduler();
     let overflowCount = 0;
     for (let i = 0; i < 1000; i += 1) {
-      const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", ts: 0 }, 0);
+      const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", receivedAtMs: 0 }, 0);
       if (r.bufferOverflow) overflowCount += 1;
       expect(sch.getBufferLength()).toBeLessThanOrEqual(BUFFER_CAP);
     }
@@ -413,8 +420,8 @@ describe("createMidiScheduler — bounded buffer 256 + drop oldest (FR-25)", () 
     for (let i = 0; i < 300; i += 1) {
       sch.schedule(out, new Uint8Array([0xb0, 1, 2]), {
         type: "controlChange",
-        srvTs: 1300,
-        ts: 1000, // late → dropped
+        srvTs: 1000,
+        receivedAtMs: 1300, // late → dropped
       }, 0);
     }
     expect(sch.getBufferLength()).toBe(0); // dropped events never enter
@@ -425,7 +432,7 @@ describe("createMidiScheduler — bounded buffer 256 + drop oldest (FR-25)", () 
     const out = recordingOutput();
     const sch = createMidiScheduler();
     for (let i = 0; i < 100; i += 1) {
-      sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", ts: 0 }, 0);
+      sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", receivedAtMs: 0 }, 0);
     }
     expect(sch.getBufferLength()).toBe(100);
     sch.reset();
@@ -442,8 +449,80 @@ describe("createMidiScheduler — Mock vs real output agnostic (MidiSendable)", 
       send: (data: Uint8Array) => sends.push(new Uint8Array(data)),
     };
     const sch: MidiScheduler = createMidiScheduler();
-    sch.schedule(minimal, new Uint8Array([0x90, 60, 100]), { type: "noteOn", ts: 0 }, 0);
+    sch.schedule(minimal, new Uint8Array([0x90, 60, 100]), { type: "noteOn", receivedAtMs: 0 }, 0);
     expect(sends).toHaveLength(1);
+  });
+});
+
+// --- Story 6.8 hotfix — cross-client clock domains (NFR-2 / NFR-19) ------------
+//
+// Proves the prod bug is fixed: the listener NEVER compares a performer
+// `performance.now()` with the listener/server clocks. Latency uses ONLY the
+// comparable epoch pair (`receivedAtMs` - `srvTs`, both `Date.now()`); scheduling
+// uses ONLY the local `performance.now()`. A wild performer `event.ts` is not
+// even an argument to the scheduler, so it cannot inflate latency.
+
+describe("createMidiScheduler — cross-client clocks are NEVER compared (Story 6.8 hotfix)", () => {
+  it("latency is the epoch pair receivedAtMs - srvTs (sane ms), NOT ~1.78e12 garbage", () => {
+    const out = recordingOutput();
+    const sch = createMidiScheduler();
+    // Realistic epoch ms (2026 ≈ 1.78e12). Server relayed 50 ms ago.
+    const srvTs = 1_783_000_000_000;
+    const receivedAtMs = 1_783_000_000_050;
+    const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
+      type: "noteOn",
+      srvTs,
+      receivedAtMs,
+    }, 5000);
+    expect(r.latencyMs).toBe(50); // sane — NOT 1.78e12
+    expect(r.late).toBe(false); // 50 ≤ 200 → calm → lookahead
+    expect(r.outcome).toBe("sent");
+  });
+
+  it("a huge epoch latency (> 200) is late via the EPOCH pair, regardless of the local performance.now() `now`", () => {
+    const out = recordingOutput();
+    const sch = createMidiScheduler();
+    // The local scheduling clock `now` (performance.now.) is tiny (5000) while
+    // the epoch latency is 300 (late). Proves latency is NOT derived from `now`.
+    const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
+      type: "noteOn",
+      srvTs: 1_783_000_000_000,
+      receivedAtMs: 1_783_000_000_300, // epoch latency 300 > 200 → late
+    }, 5000);
+    expect(r.latencyMs).toBe(300);
+    expect(r.late).toBe(true);
+    expect(r.outcome).toBe("fallback");
+    expect(out.sends[0]!.ts).toBe(5000); // immediate fallback at the LOCAL `now`
+  });
+
+  it("the scheduling target uses ONLY local performance.now() — epoch clocks do NOT leak into sendAt", () => {
+    const out = recordingOutput();
+    const sch = createMidiScheduler();
+    // Epoch pair is ~1.78e12 (calm 50); local `now` is 5000. The send target
+    // MUST be 5000 + 40 = 5040 (local clock), NOT 1.78e12 + 40.
+    const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
+      type: "noteOn",
+      srvTs: 1_783_000_000_000,
+      receivedAtMs: 1_783_000_000_050,
+    }, 5000);
+    expect(r.outcome).toBe("sent");
+    expect(out.sends[0]!.ts).toBe(5040); // local performance.now() + LOOKAHEAD
+  });
+
+  it("ScheduleInfo has NO `ts` field — the performer performance.now() cannot drive late/fallback", () => {
+    // Compile-time + runtime guarantee: the only clocks the scheduler sees are
+    // `srvTs` (epoch) + `receivedAtMs` (epoch) + the local `now`. There is no
+    // `ts` parameter to mis-compare. Passing a performer `ts` is a type error.
+    const info = {
+      type: "noteOn" as const,
+      srvTs: 1_783_000_000_000,
+      receivedAtMs: 1_783_000_000_300,
+    };
+    // @ts-expect-error — `ts` is NOT a ScheduleInfo field (cross-client ts is rejected)
+    info.ts = 42;
+    const out = recordingOutput();
+    const r = createMidiScheduler().schedule(out, new Uint8Array([0x90, 60, 100]), info, 0);
+    expect(r.latencyMs).toBe(300); // the stray `ts` had no effect
   });
 });
 

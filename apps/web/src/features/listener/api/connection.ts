@@ -170,14 +170,20 @@ function handleMidiEvent(event: MidiEvent): void {
   if (output === null) return; // selected output gone (hot-unplug) → skip
   const bytes = encodeForOutput(event, store.channel);
   // Story 5.4 — bounded buffer + per-type late fallback/drop. `srvTs` is an
-  // optional server-added envelope field (telemetry only, AD-11); `ts` is the
-  // performer capture timestamp. `event.type` drives the per-type policy (FR-26).
-  // The conditional spread keeps `srvTs` absent when undefined
-  // (`exactOptionalPropertyTypes`).
+  // optional server-added envelope field (telemetry only, AD-11) stamped as
+  // `Date.now()` (epoch ms) at relay. `receivedAtMs` is the listener's OWN
+  // `Date.now()` at reception — comparable to `srvTs` (both epoch), so
+  // `receivedAtMs - srvTs` is a sane downstream latency (Story 6.8 hotfix,
+  // NFR-2/NFR-19). The performer `event.ts` (a `performance.now()`-relative
+  // monotonic value from the PERFORMER's time origin) is deliberately NOT used
+  // for late/fallback: subtracting it from the epoch `srvTs` produced ~1.78e12 ms
+  // of garbage latency on Render → every event flagged late. `event.type` drives
+  // the per-type policy (FR-26). The conditional spread keeps `srvTs` absent when
+  // undefined (`exactOptionalPropertyTypes`).
   const srvTs = (event as unknown as { srvTs?: number }).srvTs;
   const result: ScheduleResult = listenerScheduler.schedule(output, bytes, {
     type: event.type,
-    ts: event.ts,
+    receivedAtMs: Date.now(),
     ...(srvTs !== undefined ? { srvTs } : {}),
   });
   // Story 5.5 — fail-safe no-op: a stopped `schedule` (scheduler stopped on

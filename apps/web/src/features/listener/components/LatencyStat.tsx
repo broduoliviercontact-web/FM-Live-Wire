@@ -4,7 +4,8 @@ import { useListenerStore } from "../store/listenerStore";
 //
 // A small stat line shown ONLY when the LOCAL late/overload warning is active
 // (`lateWarning === true`), i.e. alongside `LateAlert`. It surfaces the last
-// relay latency (`srvTs - ts`, telemetry only — AD-11) and the fallback counter
+// downstream latency (`receivedAtMs - srvTs`, both epoch `Date.now()` —
+// comparable, Story 6.8 hotfix; telemetry only — AD-11) and the fallback counter
 // (how many late noteOn/noteOff/programChange were sent via the immediate
 // fallback path, FR-26). NOT a permanent monitoring dashboard (UX-DR12): on
 // calm reception `lateWarning` is `false` → this returns `null`.

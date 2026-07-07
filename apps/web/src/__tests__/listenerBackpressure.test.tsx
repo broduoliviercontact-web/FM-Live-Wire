@@ -155,6 +155,12 @@ beforeEach(() => {
     writable: true,
   });
   vi.spyOn(performance, "now").mockReturnValue(5000);
+  // Story 6.8 hotfix — latency = receivedAtMs(Date.now()) - srvTs (both epoch).
+  // Mock Date.now() to 2000 so a relayed srvTs yields the intended latency:
+  //   srvTs 1700 → 300 (late), srvTs 1799 → 201 (late), srvTs 1800 → 200 (calm).
+  // The performer `ts` on the relayed event is ignored (cross-client
+  // performance.now() is never compared).
+  vi.spyOn(Date, "now").mockReturnValue(2000);
 });
 
 afterEach(() => {
@@ -201,7 +207,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(useListenerStore.getState().fallbackCount).toBe(0);
   });
 
-  it("a LATE noteOn (srvTs - ts = 300 > 200) → Mock receives 1 msg IMMEDIATE (5000); fallback counter ++", async () => {
+  it("a LATE noteOn (receivedAtMs - srvTs = 300 > 200) → Mock receives 1 msg IMMEDIATE (5000); fallback counter ++", async () => {
     renderPanel();
     const socket = await joinMock();
     act(() => {
@@ -214,7 +220,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1300, // latency 300 > 200 → late → fallback immediate
+        srvTs: 1700, // latency 300 (2000 - 1700) > 200 → late → fallback immediate
       });
     });
     const mock = getMockMidiOutput();
@@ -231,7 +237,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     );
   });
 
-  it("a LATE noteOff (srvTs - ts = 300) → Mock receives 1 msg IMMEDIATE (fallback)", async () => {
+  it("a LATE noteOff (receivedAtMs - srvTs = 300) → Mock receives 1 msg IMMEDIATE (fallback)", async () => {
     renderPanel();
     const socket = await joinMock();
     act(() => {
@@ -244,7 +250,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1300,
+        srvTs: 1700,
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(1);
@@ -252,7 +258,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(useListenerStore.getState().fallbackCount).toBe(1);
   });
 
-  it("a LATE programChange (srvTs - ts = 300) → Mock receives 1 msg IMMEDIATE (fallback)", async () => {
+  it("a LATE programChange (receivedAtMs - srvTs = 300) → Mock receives 1 msg IMMEDIATE (fallback)", async () => {
     renderPanel();
     const socket = await joinMock();
     act(() => {
@@ -264,7 +270,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1300,
+        srvTs: 1700,
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(1);
@@ -272,7 +278,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(useListenerStore.getState().fallbackCount).toBe(1);
   });
 
-  it("a LATE controlChange (srvTs - ts = 300) → Mock receives NOTHING (dropped)", async () => {
+  it("a LATE controlChange (receivedAtMs - srvTs = 300) → Mock receives NOTHING (dropped)", async () => {
     renderPanel();
     const socket = await joinMock();
     act(() => {
@@ -285,7 +291,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1300, // latency 300 > 200 → late CC → drop
+        srvTs: 1700, // latency 300 (2000 - 1700) > 200 → late CC → drop
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(0); // dropped
@@ -295,7 +301,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(screen.getByTestId("listener-late-alert")).toBeInTheDocument();
   });
 
-  it("a LATE pitchBend (srvTs - ts = 300) → Mock receives NOTHING (dropped)", async () => {
+  it("a LATE pitchBend (receivedAtMs - srvTs = 300) → Mock receives NOTHING (dropped)", async () => {
     renderPanel();
     const socket = await joinMock();
     act(() => {
@@ -307,7 +313,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1300,
+        srvTs: 1700,
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(0); // dropped
@@ -328,7 +334,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1200, // latency 200 (=== MAX_LATE_MS) → not late
+        srvTs: 1800, // latency 200 (2000 - 1800, === MAX_LATE_MS) → not late
       });
     });
     expect(getMockMidiOutput().messages[0]!.timestamp).toBe(5040);
@@ -345,7 +351,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1201, // latency 201 → late
+        srvTs: 1799, // latency 201 (2000 - 1799) → late
       });
     });
     expect(getMockMidiOutput().messages[1]!.timestamp).toBe(5000);
@@ -365,7 +371,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1300, // late → warning on
+        srvTs: 1700, // late → warning on
       });
     });
     expect(screen.getByTestId("listener-late-alert")).toBeInTheDocument();
@@ -386,6 +392,39 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(screen.queryByTestId("listener-late-alert")).not.toBeInTheDocument();
     expect(screen.queryByTestId("listener-latency-stat")).not.toBeInTheDocument();
   });
+
+  it("Story 6.8 hotfix — a WILD performer ts does NOT cause absurd latency / fallback explosion", async () => {
+    renderPanel();
+    const socket = await joinMock();
+    // Reproduce the prod bug shape: the performer `ts` is a tiny
+    // performance.now()-relative value (5 ms from page load) while the server
+    // `srvTs` is an epoch Date.now() (~1.78e12). BEFORE the fix, the listener
+    // computed srvTs - ts ≈ 1.78e12 → every event flagged late → fallback/drop
+    // explosion. AFTER the fix, the performer ts is IGNORED and latency uses the
+    // comparable epoch pair receivedAtMs(Date.now()=2000) - srvTs.
+    // Use a calm srvTs (1950 → latency 50) so the event stays on the lookahead
+    // path: no fallback, no drop, no alert, sane latency.
+    act(() => {
+      socket.fireServer("midi:event", {
+        type: "noteOn",
+        channel: 0,
+        note: 60,
+        velocity: 100,
+        seq: 42,
+        ts: 5, // wild performer performance.now() — would have caused 1.78e12 ms
+        v: PROTOCOL_VERSION,
+        roomId: ROOM,
+        srvTs: 1950, // epoch; receivedAtMs 2000 → latency 50 (calm)
+      });
+    });
+    expect(getMockMidiOutput().messages).toHaveLength(1);
+    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(5040); // lookahead, NOT immediate
+    expect(useListenerStore.getState().fallbackCount).toBe(0);
+    expect(useListenerStore.getState().droppedCount).toBe(0);
+    expect(useListenerStore.getState().lateWarning).toBe(false);
+    expect(useListenerStore.getState().lastLatencyMs).toBe(50); // sane, NOT 1.78e12
+    expect(screen.queryByTestId("listener-late-alert")).not.toBeInTheDocument();
+  });
 });
 
 describe("Backpressure — NO server overload event, NO extra socket.emit (FR-27 / AC-U11)", () => {
@@ -403,7 +442,7 @@ describe("Backpressure — NO server overload event, NO extra socket.emit (FR-27
         ts: 1000,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1300, // late → dropped + LOCAL warning
+        srvTs: 1700, // late → dropped + LOCAL warning
       });
     });
     // No new emit was produced by the backpressure layer (no server overload).

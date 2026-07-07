@@ -353,6 +353,8 @@ Sous-étapes (addendum A.7 étape 10) — **si réalisable sans modifier l'app**
 
 **Objectif** : valider l'invariant S-6 (latence perçue performer → listener < ~80 ms LAN / < ~150 ms internet ; < ~5 % de fallbacks immédiats en conditions stables) et observer la backpressure (Story 5.4, FR-26 : `MAX_LATE_MS = 200`).
 
+> ⚠️ **Précaution source MIDI (rate-limit serveur, Story 2.5)** : pour le test de base, **désactiver toute MIDI clock / boucle IAC / arpège continu** côté performer. Un flux continu (loops/arps/clock) sature rapidement le burst serveur (200 events, refill 100/s) → `Limite de débit atteinte` côté performer + burst relayé au listener → backpressure (fallbacks/drops) qui n'est PAS un défaut de latence réseau. Ces flux continus sont utiles pour tester la backpressure exprès (sous-étape 2), mais PAS pour mesurer la latence de base (sous-étape 1). Jouer des notes individuelles / phrases pour la mesure S-6.
+
 Sous-étapes (addendum A.7 étapes 6 + 11) :
 1. **Relay live** : performer joue → listener entend sur Dexed ; mesurer la latence perçue (méthode : enregistrement audio/click comparé, ou perception jouée).
 2. **Backpressure** : simuler un burst de CC (ou noteOn rapide) → observer l'UI listener (LateAlert Story 5.4 : `⚠ Flux en retard / connexion instable — latence {ms} ms`) **en cas de retard** ; sinon aucun LateAlert persistant.

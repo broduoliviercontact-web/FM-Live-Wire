@@ -158,6 +158,11 @@ beforeEach(() => {
     writable: true,
   });
   vi.spyOn(performance, "now").mockReturnValue(1000);
+  // Story 6.8 hotfix — the wiring stamps `receivedAtMs = Date.now()` (epoch) at
+  // reception and computes latency as `receivedAtMs - srvTs` (both epoch). Mock
+  // `Date.now()` to 1100 so a relayed `srvTs: 1050` yields a calm 50 ms latency
+  // (1100 - 1050), keeping this test on the lookahead path (sendAt 1000 + 40).
+  vi.spyOn(Date, "now").mockReturnValue(1100);
 });
 
 afterEach(() => {
@@ -181,17 +186,18 @@ describe("Listener reception — midi:event → remap → toMidiBytes → send",
     const socket = await join();
 
     // Server relays the midi:event WITH envelope fields (performerId, srvTs).
-    // Story 5.4: srvTs is now consumed for the late check (srvTs - ts > 200).
-    // Use a CALM srvTs (1050 − 1000 = 50 ms ≤ 200) so this noteOn stays on the
-    // lookahead path and the scheduled timestamp is still 1000 + 40 = 1040
-    // (this test proves the lookahead + remap, not the late path).
+    // Story 6.8 hotfix: latency = receivedAtMs(Date.now()=1100) - srvTs(1050) = 50
+    // ms ≤ 200 → calm → lookahead. The performer `ts` below is a wild
+    // performance.now()-relative value (5 ms from page load) — it is IGNORED for
+    // late/fallback (cross-client performance.now() is never compared). This
+    // proves the lookahead + remap, not the late path.
     const relayed = {
       type: "noteOn" as const,
       channel: 5,
       note: 60,
       velocity: 100,
       seq: 1,
-      ts: 1000,
+      ts: 5,
       v: PROTOCOL_VERSION,
       roomId: ROOM,
       performerId: "srv-owner",

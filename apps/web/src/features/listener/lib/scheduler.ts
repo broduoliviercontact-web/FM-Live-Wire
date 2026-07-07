@@ -19,10 +19,30 @@
 //     `output.send(data, now)` (the note / program is NOT lost).
 //   - controlChange / pitchBend late → DROP (high-frequency, droppable late).
 //
-// "Late" means `srvTs - ts > MAX_LATE_MS` (strictly greater). 200 ms exact is
-// NOT late (boundary), 201 ms IS late. `srvTs` is optional on a relayed event
-// (absent → no latency check → normal lookahead path — preserves the existing
-// calm-reception behavior).
+// "Late" means `receivedAtMs - srvTs > MAX_LATE_MS` (strictly greater). 200 ms
+// exact is NOT late (boundary), 201 ms IS late. `srvTs` is optional on a relayed
+// event (absent → no latency check → normal lookahead path — preserves the
+// existing calm-reception behavior).
+//
+// CLOCK DOMAINS (Story 6.8 hotfix — cross-client latency bug, NFR-2/NFR-19):
+// There are TWO distinct clocks and they MUST NOT be mixed:
+//   - Scheduling target: the LOCAL high-res MONOTONIC clock `performance.now()`
+//     (passed as `now`). `sendAt = now + LOOKAHEAD_MS` goes to `output.send`.
+//     This is a LOCAL listener value — never compared across clients.
+//   - Latency / late: the COMPARABLE EPOCH clock `Date.now()`. The server stamps
+//     `srvTs = Date.now()` at relay (epoch ms, ~1.78e12 in 2026); the listener
+//     stamps `receivedAtMs = Date.now()` at reception. Both are wall-clock epoch
+//     ms (NTP-synced within tens of ms across machines), so
+//     `receivedAtMs - srvTs` is a sane downstream relay→listener latency.
+//
+// The performer's `event.ts` is `event.timeStamp` (DOMHighResTimeStamp, i.e. a
+// `performance.now()`-relative MONOTONIC value from the PERFORMER's time origin).
+// It is NOT comparable to either the server's `srvTs` (epoch) or the listener's
+// `Date.now()`/`performance.now()` (different time origins). Subtracting it from
+// `srvTs` produced ~1.78e12 ms of garbage latency on Render → every event was
+// flagged late → 5783 fallbacks + 5527 drops (the prod symptom). The performer
+// `ts` is therefore NOT used for late/fallback — it stays on the event as origin
+// info only. Late is now driven solely by the comparable epoch pair above.
 //
 // Bounded buffer (FR-25): a pending count. When it reaches `BUFFER_CAP`, the
 // OLDEST pending event is dropped to make room (the count stays capped at
@@ -70,9 +90,9 @@ export type ScheduleOutcome = "sent" | "fallback" | "dropped";
 export interface ScheduleResult {
   /** The new event's fate: sent (lookahead), fallback (immediate), or dropped. */
   readonly outcome: ScheduleOutcome;
-  /** `true` when `srvTs - ts > MAX_LATE_MS` (strict). `false` when `srvTs` absent. */
+  /** `true` when `receivedAtMs - srvTs > MAX_LATE_MS` (strict). `false` when `srvTs` absent. */
   readonly late: boolean;
-  /** `srvTs - ts`, or `null` when `srvTs` is absent (no latency info). */
+  /** `receivedAtMs - srvTs` (epoch ms, comparable), or `null` when `srvTs` is absent. */
   readonly latencyMs: number | null;
   /** The buffer was full → the OLDEST pending event was dropped (FR-25). */
   readonly bufferOverflow: boolean;
@@ -87,22 +107,34 @@ export interface ScheduleResult {
 /** Info needed to schedule one event (besides the raw bytes + the output). */
 export interface ScheduleInfo {
   readonly type: MidiEventType;
-  /** Server relay timestamp (telemetry only, AD-11). Absent → no latency check. */
+  /** Server relay timestamp, epoch ms (`Date.now()` server-side). Telemetry only, AD-11. Absent → no latency check. */
   readonly srvTs?: number;
-  /** Performer capture timestamp (ms). */
-  readonly ts: number;
+  /**
+   * Listener receipt time, epoch ms (`Date.now()` at reception). Comparable to
+   * `srvTs` (both wall-clock epoch, NTP-synced) → `receivedAtMs - srvTs` is a
+   * sane downstream latency. NOT the performer `event.ts` (a `performance.now()`
+   * from a different time origin — never comparable across clients).
+   */
+  readonly receivedAtMs: number;
 }
 
 /**
- * Compute the relay latency `srvTs - ts`, or `null` when `srvTs` is absent.
- * Pure: no clock, no output, no side effect.
+ * Compute the downstream relay latency `receivedAtMs - srvTs` (epoch ms − epoch
+ * ms, comparable), or `null` when `srvTs` is absent. Pure: no clock, no output,
+ * no side effect.
+ *
+ * NOTE: this deliberately does NOT use the performer `event.ts`. The server's
+ * `srvTs` is epoch `Date.now()` while the performer's `ts` is a
+ * `performance.now()`-relative monotonic value — subtracting them yields
+ * ~1.78e12 ms of garbage (the Render prod symptom). Only the comparable epoch
+ * pair (`receivedAtMs`, `srvTs`) is used.
  */
 export function computeLatencyMs(
   srvTs: number | undefined,
-  ts: number,
+  receivedAtMs: number,
 ): number | null {
   if (srvTs === undefined) return null;
-  return srvTs - ts;
+  return receivedAtMs - srvTs;
 }
 
 /**
@@ -172,8 +204,11 @@ export function decideBackpressure(
 export interface MidiScheduler {
   /**
    * Schedule `data` on `output` for `info`. Performs the send / fallback / drop
-   * and returns the result (drives the listener-store telemetry). `now` defaults
-   * to `performance.now()`; tests inject a fixed clock for deterministic asserts.
+   * and returns the result (drives the listener-store telemetry). `now` is the
+   * LOCAL scheduling clock (`performance.now()` by default; tests inject a fixed
+   * value) used ONLY for `sendAt = now + LOOKAHEAD_MS` — it is never compared
+   * across clients. The late/latency check uses `info.receivedAtMs` (epoch)
+   * vs `info.srvTs` (epoch), a separate, comparable clock pair.
    *
    * Story 5.5: when STOPPED, this is a no-op — it returns a `stopped` result and
    * performs NO `output.send` (true fail-safe gate).
@@ -268,12 +303,12 @@ export function createMidiScheduler(
         return {
           outcome: "dropped",
           late: false,
-          latencyMs: computeLatencyMs(info.srvTs, info.ts),
+          latencyMs: computeLatencyMs(info.srvTs, info.receivedAtMs),
           bufferOverflow: false,
           stopped: true,
         };
       }
-      const latencyMs = computeLatencyMs(info.srvTs, info.ts);
+      const latencyMs = computeLatencyMs(info.srvTs, info.receivedAtMs);
       const late = isLate(latencyMs);
       const result = decideBackpressure({
         type: info.type,

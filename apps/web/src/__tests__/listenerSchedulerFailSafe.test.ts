@@ -36,8 +36,8 @@ const bytes = (arr: number[]): Uint8Array => Uint8Array.of(...arr);
 
 const info = {
   type: "noteOn" as const,
-  ts: 1000,
-  // no srvTs → calm → lookahead path
+  receivedAtMs: 1000,
+  // no srvTs → calm → lookahead path (receivedAtMs unused when srvTs absent)
 };
 
 describe("createMidiScheduler — fail-safe gate (stop / start / isStopped)", () => {
