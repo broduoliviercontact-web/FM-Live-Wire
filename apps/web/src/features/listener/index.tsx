@@ -92,6 +92,16 @@ export function ListenerPanel() {
           <TestNoteButton />
           <StatusPill />
           <MidiActivityIndicator />
+          {/* Hotfix fidélité musicale — static indicator that the listener uses a
+              deferred playback buffer (~1.5 s) to preserve the performer's
+              relative musical timing despite network jitter. Always-on (constant
+              `PLAYBACK_DELAY_MS`); no setting. Muted, informational. */}
+          <p
+            className="text-xs text-muted-foreground"
+            data-testid="listener-playback-delay"
+          >
+            Différé MIDI : 1.5 s (préservation du timing musical)
+          </p>
           {/* Story 4.5 — empty/error states: waiting hint (E7-adjacent empty),
               performer-disconnected pill (E7), server-down pill, and the E13
               protocol-version alert. The pill text covers server-down/E7; this

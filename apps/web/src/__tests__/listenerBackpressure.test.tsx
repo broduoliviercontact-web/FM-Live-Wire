@@ -3,14 +3,16 @@
 // Mock output + listener store + LateAlert, with NO server overload event
 // (FR-27 / AC-U11) and NO extra `socket.emit`.
 //
-// Drives the REAL JoinButton + MidiAccessProvider + listenerStore + scheduler
-// (via the connection layer) + Mock output. socket.io-client is mocked (fake
-// socket: records emits, fires server events + acks). Web MIDI is mocked with
-// ZERO real outputs, so only the Mock singleton is the sink. `performance.now()`
-// is spied to 5000 so the scheduled timestamp is deterministic:
-//   - normal (calm) → 5000 + 40 = 5040 (lookahead);
-//   - late noteOn → 5000 (immediate fallback);
-//   - late controlChange → dropped (no capture).
+// Hotfix fidélité musicale — the scheduler is now DEFERRED: a calm event is
+// sent at `now + PLAYBACK_DELAY_MS` (1500), and "late" is SCHEDULE-late (the
+// deferred buffer could not absorb the jitter). A single event always anchors
+// to `now + 1500` (the future) → never late, so to exercise the late path we
+// PRIME an anchor with a calm event (now 5000, ts 1000 → anchor { 1000, 6500 }),
+// then ADVANCE `performance.now()` to 7000 and fire the event under test
+// (ts 1120 → target 6620 < 7040 → schedule-late). Deterministic timestamps:
+//   - calm (single event, now 5000) → 6500 (now + PLAYBACK_DELAY_MS);
+//   - late noteOn (primed, now 7000) → 7000 (immediate fallback);
+//   - late controlChange (primed, now 7000) → dropped (no capture).
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import {
@@ -139,6 +141,37 @@ async function joinMock() {
   return socket;
 }
 
+/** The current `performance.now()` mock value (advanced between events). */
+let nowMock = 5000;
+function setNow(v: number): void {
+  nowMock = v;
+  vi.spyOn(performance, "now").mockReturnValue(v);
+}
+
+/**
+ * Hotfix fidélité musicale — prime a deferred-playback anchor so the NEXT event
+ * can be schedule-late. Fires a calm noteOn at now 5000 (ts 1000 → anchor
+ * { 1000, 6500 }), then clears the Mock capture so the test event is the only
+ * observed message. The caller then advances `now` (e.g. to 7000) and fires the
+ * event under test (ts 1120 → target 6620 < now+40 → late).
+ */
+function primeAnchor(socket: { fireServer: (ev: string, arg?: unknown) => void }): void {
+  setNow(5000);
+  act(() => {
+    socket.fireServer("midi:event", {
+      type: "noteOn",
+      channel: 0,
+      note: 0,
+      velocity: 1,
+      seq: 0,
+      ts: 1000,
+      v: PROTOCOL_VERSION,
+      roomId: ROOM,
+    });
+  });
+  getMockMidiOutput().reset(); // focus assertions on the event under test
+}
+
 beforeEach(() => {
   useListenerStore.getState().reset();
   __resetListenerConnection();
@@ -154,12 +187,10 @@ beforeEach(() => {
     configurable: true,
     writable: true,
   });
+  nowMock = 5000;
   vi.spyOn(performance, "now").mockReturnValue(5000);
-  // Story 6.8 hotfix — latency = receivedAtMs(Date.now()) - srvTs (both epoch).
-  // Mock Date.now() to 2000 so a relayed srvTs yields the intended latency:
-  //   srvTs 1700 → 300 (late), srvTs 1799 → 201 (late), srvTs 1800 → 200 (calm).
-  // The performer `ts` on the relayed event is ignored (cross-client
-  // performance.now() is never compared).
+  // The epoch `Date.now()` is now TELEMETRY-ONLY (the late decision is
+  // schedule-late). Kept mocked for the `effectiveLatencyMs` computation.
   vi.spyOn(Date, "now").mockReturnValue(2000);
 });
 
@@ -181,7 +212,7 @@ afterEach(() => {
 });
 
 describe("Backpressure integration — midi:event → scheduler → Mock + store", () => {
-  it("a CALM noteOn (no srvTs) → Mock receives 1 msg with lookahead (5040); no alert", async () => {
+  it("a CALM noteOn (no srvTs) → Mock receives 1 DEFERRED msg (6500); no alert", async () => {
     renderPanel();
     const socket = await joinMock();
     act(() => {
@@ -198,7 +229,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     });
     const mock = getMockMidiOutput();
     expect(mock.messages).toHaveLength(1);
-    expect(mock.messages[0]!.timestamp).toBe(5040); // 5000 + LOOKAHEAD_MS(40)
+    expect(mock.messages[0]!.timestamp).toBe(6500); // 5000 + PLAYBACK_DELAY_MS(1500)
     expect(Array.from(mock.messages[0]!.data)).toEqual([0x90, 60, 100]);
     // Calm reception → no alert, no stat.
     expect(screen.queryByTestId("listener-late-alert")).not.toBeInTheDocument();
@@ -207,9 +238,11 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(useListenerStore.getState().fallbackCount).toBe(0);
   });
 
-  it("a LATE noteOn (receivedAtMs - srvTs = 300 > 200) → Mock receives 1 msg IMMEDIATE (5000); fallback counter ++", async () => {
+  it("a SCHEDULE-LATE noteOn → Mock receives 1 msg IMMEDIATE (7000); fallback counter ++", async () => {
     renderPanel();
     const socket = await joinMock();
+    primeAnchor(socket); // anchor { 1000, 6500 }, Mock cleared
+    setNow(7000); // advance past the slot (target 6620 < 7040 → late)
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOn",
@@ -217,15 +250,15 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         note: 60,
         velocity: 100,
         seq: 2,
-        ts: 1000,
+        ts: 1120, // target 6500 + 120 = 6620 < now(7000)+40 → schedule-late
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1700, // latency 300 (2000 - 1700) > 200 → late → fallback immediate
+        srvTs: 1700,
       });
     });
     const mock = getMockMidiOutput();
     expect(mock.messages).toHaveLength(1); // noteOn NOT lost (fallback)
-    expect(mock.messages[0]!.timestamp).toBe(5000); // immediate (not 5040)
+    expect(mock.messages[0]!.timestamp).toBe(7000); // immediate (now), NOT deferred
     expect(Array.from(mock.messages[0]!.data)).toEqual([0x90, 60, 100]);
     // Late → alert + stat visible, fallback counter incremented.
     expect(useListenerStore.getState().lateWarning).toBe(true);
@@ -237,9 +270,11 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     );
   });
 
-  it("a LATE noteOff (receivedAtMs - srvTs = 300) → Mock receives 1 msg IMMEDIATE (fallback)", async () => {
+  it("a SCHEDULE-LATE noteOff → Mock receives 1 msg IMMEDIATE (fallback)", async () => {
     renderPanel();
     const socket = await joinMock();
+    primeAnchor(socket);
+    setNow(7000);
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOff",
@@ -247,40 +282,44 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         note: 60,
         velocity: 0,
         seq: 3,
-        ts: 1000,
+        ts: 1120,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
         srvTs: 1700,
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(1);
-    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(5000); // immediate
+    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(7000); // immediate
     expect(useListenerStore.getState().fallbackCount).toBe(1);
   });
 
-  it("a LATE programChange (receivedAtMs - srvTs = 300) → Mock receives 1 msg IMMEDIATE (fallback)", async () => {
+  it("a SCHEDULE-LATE programChange → Mock receives 1 msg IMMEDIATE (fallback)", async () => {
     renderPanel();
     const socket = await joinMock();
+    primeAnchor(socket);
+    setNow(7000);
     act(() => {
       socket.fireServer("midi:event", {
         type: "programChange",
         channel: 0,
         program: 42,
         seq: 4,
-        ts: 1000,
+        ts: 1120,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
         srvTs: 1700,
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(1);
-    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(5000);
+    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(7000);
     expect(useListenerStore.getState().fallbackCount).toBe(1);
   });
 
-  it("a LATE controlChange (receivedAtMs - srvTs = 300) → Mock receives NOTHING (dropped)", async () => {
+  it("a SCHEDULE-LATE controlChange → Mock receives NOTHING (dropped)", async () => {
     renderPanel();
     const socket = await joinMock();
+    primeAnchor(socket);
+    setNow(7000);
     act(() => {
       socket.fireServer("midi:event", {
         type: "controlChange",
@@ -288,10 +327,10 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         controller: 74,
         value: 91,
         seq: 5,
-        ts: 1000,
+        ts: 1120,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1700, // latency 300 (2000 - 1700) > 200 → late CC → drop
+        srvTs: 1700,
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(0); // dropped
@@ -301,16 +340,18 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(screen.getByTestId("listener-late-alert")).toBeInTheDocument();
   });
 
-  it("a LATE pitchBend (receivedAtMs - srvTs = 300) → Mock receives NOTHING (dropped)", async () => {
+  it("a SCHEDULE-LATE pitchBend → Mock receives NOTHING (dropped)", async () => {
     renderPanel();
     const socket = await joinMock();
+    primeAnchor(socket);
+    setNow(7000);
     act(() => {
       socket.fireServer("midi:event", {
         type: "pitchBend",
         channel: 0,
         pitchBend: 8192,
         seq: 6,
-        ts: 1000,
+        ts: 1120,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
         srvTs: 1700,
@@ -320,10 +361,12 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(useListenerStore.getState().droppedCount).toBe(1);
   });
 
-  it("latency 200 ms exact → NOT late (lookahead 5040); 201 ms → late (immediate 5000)", async () => {
+  it("schedule-late boundary: target === now+LOOKAHEAD → deferred sent; target-1 → fallback", async () => {
     renderPanel();
     const socket = await joinMock();
-    // 200 ms exact → calm → lookahead.
+    primeAnchor(socket); // anchor { 1000, 6500 }
+    setNow(7000); // boundary = 7040
+    // target = 6500 + (1540 - 1000) = 7040 === now + LOOKAHEAD → NOT late → deferred.
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOn",
@@ -331,16 +374,16 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         note: 60,
         velocity: 100,
         seq: 7,
-        ts: 1000,
+        ts: 1540,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1800, // latency 200 (2000 - 1800, === MAX_LATE_MS) → not late
+        srvTs: 1800,
       });
     });
-    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(5040);
+    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(7040); // deferred at boundary
     expect(useListenerStore.getState().lateWarning).toBe(false);
 
-    // 201 ms → late → fallback immediate.
+    // target = 6500 + (1539 - 1000) = 7039 < 7040 → late → fallback immediate.
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOn",
@@ -348,19 +391,22 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         note: 61,
         velocity: 100,
         seq: 8,
-        ts: 1000,
+        ts: 1539,
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1799, // latency 201 (2000 - 1799) → late
+        srvTs: 1799,
       });
     });
-    expect(getMockMidiOutput().messages[1]!.timestamp).toBe(5000);
+    expect(getMockMidiOutput().messages[1]!.timestamp).toBe(7000); // immediate fallback
     expect(useListenerStore.getState().lateWarning).toBe(true);
   });
 
-  it("a calm event AFTER a late one clears the warning (alerte-only)", async () => {
+  it("a calm (on-slot) event AFTER a late one clears the warning (alerte-only)", async () => {
     renderPanel();
     const socket = await joinMock();
+    primeAnchor(socket);
+    setNow(7000);
+    // Late event → warning on.
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOn",
@@ -368,14 +414,14 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         note: 60,
         velocity: 100,
         seq: 9,
-        ts: 1000,
+        ts: 1120, // target 6620 < 7040 → late
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1700, // late → warning on
+        srvTs: 1700,
       });
     });
     expect(screen.getByTestId("listener-late-alert")).toBeInTheDocument();
-    // A calm event (no srvTs) → warning cleared.
+    // A calm (on-slot) event at now 7000: ts 2000 → target 7500 ≥ 7040 → NOT late.
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOn",
@@ -383,7 +429,7 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         note: 62,
         velocity: 100,
         seq: 10,
-        ts: 1000,
+        ts: 2000, // target 6500 + 1000 = 7500 ≥ 7040 → on slot
         v: PROTOCOL_VERSION,
         roomId: ROOM,
       });
@@ -393,17 +439,17 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(screen.queryByTestId("listener-latency-stat")).not.toBeInTheDocument();
   });
 
-  it("Story 6.8 hotfix — a WILD performer ts does NOT cause absurd latency / fallback explosion", async () => {
+  it("Story 6.8 hotfix — a WILD performer ts is used ONLY relatively (no latency explosion)", async () => {
     renderPanel();
     const socket = await joinMock();
     // Reproduce the prod bug shape: the performer `ts` is a tiny
     // performance.now()-relative value (5 ms from page load) while the server
-    // `srvTs` is an epoch Date.now() (~1.78e12). BEFORE the fix, the listener
-    // computed srvTs - ts ≈ 1.78e12 → every event flagged late → fallback/drop
-    // explosion. AFTER the fix, the performer ts is IGNORED and latency uses the
-    // comparable epoch pair receivedAtMs(Date.now()=2000) - srvTs.
-    // Use a calm srvTs (1950 → latency 50) so the event stays on the lookahead
-    // path: no fallback, no drop, no alert, sane latency.
+    // `srvTs` is an epoch Date.now() (~1.78e12). BEFORE the original 6.8 fix,
+    // the listener computed srvTs - ts ≈ 1.78e12 → every event flagged late.
+    // Hotfix fidélité musicale: the performer ts is now used ONLY as RELATIVE
+    // musical time (anchored locally), so a wild ts=5 simply anchors at
+    // now(5000)+1500 = 6500; no explosion. The event is calm (on slot) → sent
+    // deferred, no fallback, no drop, no alert, retard 0.
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOn",
@@ -411,29 +457,30 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         note: 60,
         velocity: 100,
         seq: 42,
-        ts: 5, // wild performer performance.now() — would have caused 1.78e12 ms
+        ts: 5, // wild performer performance.now() — anchored relatively, not compared
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1950, // epoch; receivedAtMs 2000 → latency 50 (calm)
+        srvTs: 1950, // epoch telemetry (no longer drives the decision)
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(1);
-    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(5040); // lookahead, NOT immediate
+    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(6500); // deferred, NOT immediate
     expect(useListenerStore.getState().fallbackCount).toBe(0);
     expect(useListenerStore.getState().droppedCount).toBe(0);
     expect(useListenerStore.getState().lateWarning).toBe(false);
-    expect(useListenerStore.getState().lastLatencyMs).toBe(50); // sane, NOT 1.78e12
+    // The displayed value is the restitution retard (0 = on time), NOT 1.78e12.
+    expect(useListenerStore.getState().lastLatencyMs).toBe(0);
     expect(screen.queryByTestId("listener-late-alert")).not.toBeInTheDocument();
   });
 
-  it("Story 6.8 negative-latency hotfix — clock skew (receivedAtMs - srvTs = -162) → NOT late, no fallback/drop, no LateAlert", async () => {
+  it("Story 6.8 negative-latency hotfix — clock skew no longer matters for late (schedule-late decides)", async () => {
     renderPanel();
     const socket = await joinMock();
-    // Reproduce the post-Render-retest symptom: the listener clock runs behind
-    // the server, so receivedAtMs(Date.now()=2000) - srvTs(2162) = -162. A
-    // negative one-way estimate is meaningless (it does NOT mean the event
-    // arrived "before" relay) and must NOT read as a delay. The scheduler clamps
-    // to effectiveLatencyMs = 0 → not late → sent on lookahead → no alert.
+    // The epoch clock skew (receivedAtMs - srvTs = -162) used to be clamped to
+    // avoid a false late. Now late is SCHEDULE-late (independent of the epoch
+    // pair), so a single event with a wild ts anchors at now+1500 and is NEVER
+    // late → sent deferred, no fallback/drop, no alert. The epoch latency is
+    // pure telemetry (no longer displayed / no longer drives the alert).
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOn",
@@ -441,26 +488,28 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
         note: 60,
         velocity: 100,
         seq: 77,
-        ts: 5, // wild performer ts — ignored
+        ts: 5, // wild performer ts — anchored relatively
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 2162, // epoch; 2000 - 2162 = -162 (clock skew) → effective 0
+        srvTs: 2162, // epoch skew (2000 - 2162 = -162) — telemetry only now
       });
     });
     expect(getMockMidiOutput().messages).toHaveLength(1); // kept (sent, not dropped)
-    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(5040); // lookahead, NOT immediate
+    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(6500); // deferred, NOT immediate
     expect(useListenerStore.getState().fallbackCount).toBe(0);
     expect(useListenerStore.getState().droppedCount).toBe(0);
-    expect(useListenerStore.getState().lateWarning).toBe(false); // no alert from latency
-    expect(useListenerStore.getState().lastLatencyMs).toBe(0); // clamped, NOT -162
+    expect(useListenerStore.getState().lateWarning).toBe(false); // on slot → no alert
+    expect(useListenerStore.getState().lastLatencyMs).toBe(0); // retard 0 (on time)
     expect(screen.queryByTestId("listener-late-alert")).not.toBeInTheDocument();
   });
 });
 
 describe("Backpressure — NO server overload event, NO extra socket.emit (FR-27 / AC-U11)", () => {
-  it("a late event does NOT emit a server overload event (nor any extra event) on the socket", async () => {
+  it("a schedule-late event does NOT emit a server overload event (nor any extra event) on the socket", async () => {
     renderPanel();
     const socket = await joinMock();
+    primeAnchor(socket);
+    setNow(7000);
     const emitCountBefore = socket.emitCalls.length;
     act(() => {
       socket.fireServer("midi:event", {
@@ -469,10 +518,10 @@ describe("Backpressure — NO server overload event, NO extra socket.emit (FR-27
         controller: 1,
         value: 2,
         seq: 11,
-        ts: 1000,
+        ts: 1120, // schedule-late → dropped + LOCAL warning
         v: PROTOCOL_VERSION,
         roomId: ROOM,
-        srvTs: 1700, // late → dropped + LOCAL warning
+        srvTs: 1700,
       });
     });
     // No new emit was produced by the backpressure layer (no server overload).
@@ -494,7 +543,7 @@ describe("Backpressure — NO server overload event, NO extra socket.emit (FR-27
           note: 60,
           velocity: 100,
           seq: 100 + i,
-          ts: 1000,
+          ts: 1000, // all calm (same ts → same target 6500, on slot at now 5000)
           v: PROTOCOL_VERSION,
           roomId: ROOM,
         });

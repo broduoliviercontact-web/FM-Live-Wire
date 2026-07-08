@@ -8,8 +8,9 @@
 //     server-down / performer-disconnected) and even with NO output selected;
 //   - it is fixed to the bottom of the viewport (sticky, never hidden by
 //     scroll) and meets the 44px minimum touch target;
-//   - clicking with the Mock selected sends the 64-message Panic sweep to the
-//     shared `MockMidiOutput` (no hardware sound);
+//   - clicking with the Mock selected sends the Panic sweep to the shared
+//     `MockMidiOutput` (no hardware sound): 128-noteOff channel sweep + 64 CC
+//     (Hotfix fidélité musicale — Option B blanket sweep + the 5.2 CC panic);
 //   - clicking with NO output is a no-op (no crash, button stays enabled).
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
@@ -128,7 +129,7 @@ describe("PanicButton — click behavior", () => {
     act(() => {
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
-    expect(getMockMidiOutput().messages).toHaveLength(64);
+    expect(getMockMidiOutput().messages).toHaveLength(192);
   });
 
   it("clicking with NO output is a no-op (no crash, button stays enabled)", () => {
@@ -149,7 +150,7 @@ describe("PanicButton — click behavior", () => {
     act(() => {
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
-    expect(getMockMidiOutput().messages).toHaveLength(64);
+    expect(getMockMidiOutput().messages).toHaveLength(192);
   });
 });
 

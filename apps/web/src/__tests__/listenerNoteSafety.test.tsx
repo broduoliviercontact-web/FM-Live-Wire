@@ -85,7 +85,7 @@ vi.mock("socket.io-client", () => ({
   },
 }));
 
-// --- Web MIDI mock: TWO real outputs, each with its OWN send spy -------------
+// --- Web MIDI mock: TWO real outputs, each with its OWN send + clear spy -------
 interface FakeMIDIPort {
   id: string;
   name: string;
@@ -93,6 +93,7 @@ interface FakeMIDIPort {
   state: string;
   connection: string;
   send: (data: Uint8Array, ts: number) => void;
+  clear: () => void;
 }
 interface FakeMIDIAccess {
   inputs: Map<string, FakeMIDIPort>;
@@ -103,16 +104,20 @@ interface FakeMIDIAccess {
 
 /** Per-port send spies (keyed by port id) so we can prove OLD vs NEW targeting. */
 const portSpies: Record<string, ReturnType<typeof vi.fn>> = {};
+/** Per-port `clear` spies (Hotfix fidélité musicale — deferred-playback cancel). */
+const portClearSpies: Record<string, ReturnType<typeof vi.fn>> = {};
 
 const midiMock = {
-  nextOutputs: [] as Omit<FakeMIDIPort, "send">[],
+  nextOutputs: [] as Omit<FakeMIDIPort, "send" | "clear">[],
   lastAccess: null as FakeMIDIAccess | null,
   spy: vi.fn(async () => {
     const outputs = new Map<string, FakeMIDIPort>();
     for (const p of midiMock.nextOutputs) {
       const spy = vi.fn((_data: Uint8Array, _ts: number) => undefined);
+      const clearSpy = vi.fn(() => undefined);
       portSpies[p.id] = spy;
-      outputs.set(p.id, { ...p, send: spy });
+      portClearSpies[p.id] = clearSpy;
+      outputs.set(p.id, { ...p, send: spy, clear: clearSpy });
     }
     const access: FakeMIDIAccess = {
       inputs: new Map(),
@@ -195,6 +200,22 @@ function noteOn(seq: number, note = 60) {
   };
 }
 
+/** A compatible noteOff relayed by the server (channel 5 → remapped to store.channel). */
+function noteOff(seq: number, note = 60) {
+  return {
+    type: "noteOff" as const,
+    channel: 5,
+    note,
+    velocity: 0,
+    seq,
+    ts: 1120, // 120 ms after the noteOn in performer time → deferred slot after it
+    v: PROTOCOL_VERSION,
+    roomId: ROOM,
+    performerId: "srv-owner",
+    srvTs: 1060,
+  };
+}
+
 /** Helper: the data bytes captured by a port spy. */
 function sentBytes(spy: ReturnType<typeof vi.fn>): number[][] {
   return spy.mock.calls.map((c) => Array.from(c[0] as Uint8Array));
@@ -209,6 +230,7 @@ beforeEach(() => {
   midiMock.lastAccess = null;
   midiMock.spy.mockClear();
   for (const k of Object.keys(portSpies)) delete portSpies[k];
+  for (const k of Object.keys(portClearSpies)) delete portClearSpies[k];
   Object.defineProperty(window, "isSecureContext", {
     value: true,
     configurable: true,
@@ -265,14 +287,20 @@ describe("anti-stuck-notes — port change sends noteOffs to the OLD output", ()
     expect(o1After.some((b) => b[0] === 0x80 && b[1] === 60 && b[2] === 0)).toBe(
       true,
     );
-    // ... AND the 64-CC panic sweep on o1 (noteOn + noteOff + 64 CC = 66).
-    expect(portSpies["o1"]!).toHaveBeenCalledTimes(1 + 1 + 64);
-    expect(o1After[1]).toEqual([0x80, 60, 0]); // explicit noteOff (right after the noteOn)
-    expect(o1After[2]).toEqual([0xb0, 64, 0]); // first CC of the panic sweep
+    // Hotfix fidélité musicale — Option B: clear() FIRST, then tracked noteOff,
+    // then a 128-noteOff sweep on the OLD output + selected channel, then 64 CC.
+    // Total on o1: 1 noteOn + 1 tracked noteOff + 128 sweep + 64 CC = 194.
+    expect(portClearSpies["o1"]!).toHaveBeenCalledTimes(1); // clear() called before the safety sends
+    expect(portSpies["o1"]!).toHaveBeenCalledTimes(1 + 1 + 128 + 64);
+    expect(o1After[1]).toEqual([0x80, 60, 0]); // tracked noteOff (right after the noteOn)
+    expect(o1After[2]).toEqual([0x80, 0, 0]); // first of the 128-noteOff sweep on ch0
+    // The 64-CC panic sweep starts at index 1 + 1 + 128 = 130.
+    expect(o1After[130]).toEqual([0xb0, 64, 0]); // first CC of the panic sweep
     expect(o1After[o1After.length - 1]).toEqual([0xbf, 123, 0]);
 
-    // NEW output o2 received NOTHING from the switch (no noteOff, no panic).
+    // NEW output o2 received NOTHING from the switch (no clear, no noteOff, no panic).
     expect(portSpies["o2"]!).not.toHaveBeenCalled();
+    expect(portClearSpies["o2"]!).not.toHaveBeenCalled();
 
     // The next event lands on o2 (and is tracked under o2, not o1).
     act(() => {
@@ -281,7 +309,7 @@ describe("anti-stuck-notes — port change sends noteOffs to the OLD output", ()
     expect(portSpies["o2"]!).toHaveBeenCalledTimes(1);
     expect(sentBytes(portSpies["o2"]!)[0]).toEqual([0x90, 62, 100]);
     // o1 is untouched by the new event.
-    expect(portSpies["o1"]!).toHaveBeenCalledTimes(1 + 1 + 64);
+    expect(portSpies["o1"]!).toHaveBeenCalledTimes(1 + 1 + 128 + 64);
   });
 });
 
@@ -304,12 +332,17 @@ describe("anti-stuck-notes — channel change sends noteOffs on the OLD channel"
     });
     expect(useListenerStore.getState().channel).toBe(5);
 
-    // OLD channel 0 got: noteOff [0x80,60,0] + CC120 [0xb0,120,0] + CC123 [0xb0,123,0].
+    // Hotfix fidélité musicale — Option B: clear() FIRST, then tracked noteOff on
+    // OLD ch0, then a 128-noteOff sweep on OLD ch0, then CC 120/123 on OLD ch0.
+    // Total: 1 noteOn + 1 tracked noteOff + 128 sweep + 2 CC = 132.
     const o1After = sentBytes(portSpies["o1"]!);
-    expect(o1After).toHaveLength(1 + 3); // noteOn + noteOff + 2 CC
-    expect(o1After[1]).toEqual([0x80, 60, 0]); // explicit noteOff on ch0
-    expect(o1After[2]).toEqual([0xb0, 120, 0]); // CC 120 on ch0
-    expect(o1After[3]).toEqual([0xb0, 123, 0]); // CC 123 on ch0
+    expect(portClearSpies["o1"]!).toHaveBeenCalledTimes(1); // clear() before the safety sends
+    expect(o1After).toHaveLength(1 + 1 + 128 + 2);
+    expect(o1After[1]).toEqual([0x80, 60, 0]); // tracked noteOff on ch0
+    expect(o1After[2]).toEqual([0x80, 0, 0]); // first of the 128-noteOff sweep on ch0
+    // The 2 CC start at index 1 + 1 + 128 = 130.
+    expect(o1After[130]).toEqual([0xb0, 120, 0]); // CC 120 on ch0
+    expect(o1After[131]).toEqual([0xb0, 123, 0]); // CC 123 on ch0
 
     // The next event is remapped to the NEW channel 5 (status 0x95).
     act(() => {
@@ -335,6 +368,67 @@ describe("anti-stuck-notes — channel change sends noteOffs on the OLD channel"
 });
 
 // ============================================================================
+// (Option B) — a deferred noteOff cancelled by clear() cannot leave a stuck note
+// ============================================================================
+describe("anti-stuck-notes — Option B: deferred-cancelled noteOff + 128 sweep", () => {
+  it("a channel change BEFORE a deferred noteOff fires still cuts note 60 (sweep covers it)", async () => {
+    // Hotfix fidélité musicale — with deferred playback, the noteOff is scheduled
+    // in the FUTURE. The tracker removes note 60 at the noteOff's SCHEDULE time
+    // (not its fire time). If the user changes channel BEFORE the noteOff fires,
+    // `clear()` cancels the deferred noteOff → the noteOn would fire alone → stuck
+    // note, and the tracker believes the note is already released → no tracked
+    // noteOff. The 128-noteOff sweep on the OLD channel blankets every note,
+    // covering note 60 regardless of tracker state. No stuck note possible.
+    midiMock.nextOutputs = [makePort("o1", "Volca FM")];
+    const socket = await joinReal("o1");
+    // Sound a note (deferred noteOn at 6500) → tracked under (o1, ch0, note 60).
+    act(() => {
+      socket.fireServer("midi:event", noteOn(1, 60));
+    });
+    // Schedule the noteOff (deferred, at 6620). The tracker removes note 60 NOW
+    // (at schedule time), so the tracker no longer believes note 60 is sounding.
+    act(() => {
+      socket.fireServer("midi:event", noteOff(2, 60));
+    });
+    // Change the channel BEFORE the deferred noteOff fires → clear() cancels it.
+    act(() => {
+      fireEvent.click(screen.getByTestId("listener-channel-button-6"));
+    });
+    expect(portClearSpies["o1"]!).toHaveBeenCalledTimes(1); // clear() cancelled the deferred noteOff
+    // The 128-noteOff sweep on OLD ch0 includes note 60 → the cancelled deferred
+    // noteOff is compensated. The tracker had 0 notes (it removed 60 at schedule),
+    // so the sweep is what cuts note 60.
+    const o1After = sentBytes(portSpies["o1"]!);
+    expect(o1After.some((b) => b[0] === 0x80 && b[1] === 60 && b[2] === 0)).toBe(
+      true,
+    );
+  });
+
+  it("a normal Panic BEFORE a deferred noteOff fires still cuts note 60 (sweep + clear)", async () => {
+    midiMock.nextOutputs = [makePort("o1", "Volca FM")];
+    const socket = await joinReal("o1");
+    act(() => {
+      socket.fireServer("midi:event", noteOn(1, 60));
+    });
+    act(() => {
+      socket.fireServer("midi:event", noteOff(2, 60)); // deferred; tracker removes 60
+    });
+    act(() => {
+      fireEvent.click(screen.getByTestId("listener-panic-button"));
+    });
+    expect(portClearSpies["o1"]!).toHaveBeenCalledTimes(1);
+    const o1After = sentBytes(portSpies["o1"]!);
+    // The 128-noteOff sweep on the selected channel covers note 60.
+    expect(o1After.some((b) => b[0] === 0x80 && b[1] === 60 && b[2] === 0)).toBe(
+      true,
+    );
+    // Normal Panic = clear + 0 tracked (removed at schedule) + 128 sweep + 64 CC
+    // = 192 (NOT 2048). baseline noteOn + noteOff = 2 → total 194.
+    expect(portSpies["o1"]!).toHaveBeenCalledTimes(2 + 128 + 64);
+  });
+});
+
+// ============================================================================
 // (normal Panic) — tracked noteOffs + 64-CC sweep (NOT 2048) + clear
 // ============================================================================
 describe("anti-stuck-notes — normal Panic sends tracked noteOffs + 64 CC, not 2048", () => {
@@ -349,25 +443,32 @@ describe("anti-stuck-notes — normal Panic sends tracked noteOffs + 64 CC, not 
     act(() => {
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
-    // Baseline noteOn (1) + safety: 1 tracked noteOff + 64 CC = 66 total (NOT 2048).
-    expect(portSpies["o1"]!).toHaveBeenCalledTimes(1 + 1 + 64);
+    // Hotfix fidélité musicale — Option B: clear() FIRST, then 1 tracked noteOff,
+    // then a 128-noteOff sweep on the selected channel, then 64 CC.
+    // Baseline noteOn (1) + safety: 1 + 128 + 64 = 194 total (NOT 2048).
+    expect(portClearSpies["o1"]!).toHaveBeenCalledTimes(1); // clear() before the safety sends
+    expect(portSpies["o1"]!).toHaveBeenCalledTimes(1 + 1 + 128 + 64);
     const o1After = sentBytes(portSpies["o1"]!);
     // First safety send is the explicit noteOff for the sounding note 60.
     expect(o1After[1]).toEqual([0x80, 60, 0]);
-    // Then the 64-CC sweep (CC 64..123 × 16 channels).
-    expect(o1After[2]).toEqual([0xb0, 64, 0]);
+    // Then the 128-noteOff sweep on the selected channel (ch0).
+    expect(o1After[2]).toEqual([0x80, 0, 0]);
+    // The 64-CC sweep starts at index 1 + 1 + 128 = 130.
+    expect(o1After[130]).toEqual([0xb0, 64, 0]);
     expect(o1After[o1After.length - 1]).toEqual([0xbf, 123, 0]);
     // NOT 2048 (Force Panic is the only 2048 path — see the next describe block).
-    expect(portSpies["o1"]!).toHaveBeenCalledTimes(66);
+    expect(portSpies["o1"]!).toHaveBeenCalledTimes(194);
   });
 
-  it("Panic with NO sounding note still sends the 64-CC sweep (tracker empty)", async () => {
+  it("Panic with NO sounding note still sends the 128 sweep + 64 CC (tracker empty)", async () => {
     midiMock.nextOutputs = [makePort("o1", "Volca FM")];
     await joinReal("o1");
     act(() => {
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
-    expect(portSpies["o1"]!).toHaveBeenCalledTimes(64); // 0 tracked + 64 CC
+    // 0 tracked + 128 sweep + 64 CC = 192 (Option B sweep covers the empty tracker).
+    expect(portClearSpies["o1"]!).toHaveBeenCalledTimes(1);
+    expect(portSpies["o1"]!).toHaveBeenCalledTimes(128 + 64);
   });
 });
 

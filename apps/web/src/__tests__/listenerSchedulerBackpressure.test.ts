@@ -48,6 +48,23 @@ function recordingOutput(): MidiSendable & {
   };
 }
 
+/**
+ * Hotfix fidélité musicale — prime a deferred-playback anchor so a subsequent
+ * single `schedule` call can be SCHEDULE-late. A single event with a null
+ * anchor always targets `now + PLAYBACK_DELAY_MS` (the future) → never late, so
+ * to exercise the late path on ONE call we first establish an anchor on a
+ * throwaway output (so the test's `out` captures only the event under test).
+ * Default prime: performerTs 1000 at now 1000 → anchor { 1000, 2500 }. Then a
+ * test event at now 5000 with performerTs 1120 → target 2620 < 5040 → late.
+ */
+function primeAnchor(sch: MidiScheduler, performerTs = 1000, now = 1000): void {
+  sch.schedule(recordingOutput(), new Uint8Array([0x90, 60, 100]), {
+    type: "noteOn",
+    performerTs,
+    receivedAtMs: now,
+  }, now);
+}
+
 const N = (type: MidiEventType) => type; // alias to keep lines short
 
 // --- pure helpers ------------------------------------------------------------
@@ -155,28 +172,34 @@ describe("schedule — negative latency (clock skew) never triggers late / LateA
     expect(out.sends[0]!.ts).toBe(5040);
   });
 
-  it("receivedAtMs - srvTs = 250 → IS late (> MAX_LATE_MS 200) → fallback immediate, latencyMs 250", () => {
+  it("receivedAtMs - srvTs = 250 → epoch latency 250 (telemetry); schedule-late → fallback immediate", () => {
+    // Hotfix fidélité musicale — late is now SCHEDULE-late (the deferred buffer
+    // could not absorb the jitter), no longer the epoch latency. Prime an anchor
+    // so the single test event lands past its slot. The epoch latency (250) is
+    // still reported as `latencyMs` (telemetry).
     const out = recordingOutput();
     const sched = createMidiScheduler();
+    primeAnchor(sched);
     const r = sched.schedule(
       out,
       new Uint8Array([0x90, 60, 100]),
-      mkInfo(1000, 1250), // 250 > 200 → late
+      { type: "noteOn", performerTs: 1120, srvTs: 1000, receivedAtMs: 1250 },
       5000,
     );
     expect(r.late).toBe(true);
     expect(r.outcome).toBe("fallback"); // noteOn → kept via immediate send
-    expect(r.latencyMs).toBe(250);
-    expect(out.sends[0]!.ts).toBe(5000); // immediate, NOT 5040
+    expect(r.latencyMs).toBe(250); // epoch telemetry preserved
+    expect(out.sends[0]!.ts).toBe(5000); // immediate, NOT deferred
   });
 
-  it("a late controlChange at 250 IS dropped (droppable type), confirming late still fires past MAX_LATE_MS", () => {
+  it("a schedule-late controlChange IS dropped (droppable type), confirming late still fires", () => {
     const out = recordingOutput();
     const sched = createMidiScheduler();
+    primeAnchor(sched);
     const r = sched.schedule(
       out,
       new Uint8Array([0xb0, 74, 91]),
-      { type: "controlChange", srvTs: 1000, receivedAtMs: 1250 },
+      { type: "controlChange", performerTs: 1120, srvTs: 1000, receivedAtMs: 1250 },
       5000,
     );
     expect(r.late).toBe(true);
@@ -293,53 +316,81 @@ describe("createMidiScheduler — normal reception (lookahead path)", () => {
     expect(LOOKAHEAD_MS).toBe(40);
   });
 
-  it("calm noteOn (srvTs absent) → send(data, now + LOOKAHEAD_MS)", () => {
+  it("calm noteOn (srvTs absent) → deferred send at anchorLocalMs (now + PLAYBACK_DELAY_MS = 6500)", () => {
+    // Hotfix fidélité musicale — a calm event anchors to now + 1500 and is sent
+    // at that deferred target (NOT now + 40). The first event establishes the
+    // anchor; `latencyMs` is null (no srvTs).
     const out = recordingOutput();
     const sch = createMidiScheduler();
     const data = new Uint8Array([0x90, 60, 100]);
-    const r = sch.schedule(out, data, { type: "noteOn", receivedAtMs: 1000 }, 5000);
+    const r = sch.schedule(out, data, { type: "noteOn", performerTs: 1000, receivedAtMs: 1000 }, 5000);
     expect(r.outcome).toBe("sent");
     expect(r.late).toBe(false);
     expect(r.latencyMs).toBeNull();
     expect(out.sends).toHaveLength(1);
-    expect(out.sends[0]!.ts).toBe(5040); // 5000 + 40
+    expect(out.sends[0]!.ts).toBe(6500); // 5000 + PLAYBACK_DELAY_MS (1500)
     expect(Array.from(out.sends[0]!.data)).toEqual([0x90, 60, 100]);
   });
 
-  it("calm noteOn with a calm srvTs (latency 50 ≤ 200) → lookahead (NOT fallback)", () => {
+  it("a second calm event reconstructs its slot from the ts difference (relative timing)", () => {
+    // First event ts=1000 → 6500 ; second event ts=1120 → 6500 + 120 = 6620.
+    const out = recordingOutput();
+    const sch = createMidiScheduler();
+    sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", performerTs: 1000, receivedAtMs: 1000 }, 5000);
+    const r = sch.schedule(out, new Uint8Array([0x90, 62, 100]), { type: "noteOn", performerTs: 1120, receivedAtMs: 1050 }, 5000);
+    expect(r.outcome).toBe("sent");
+    expect(out.sends[1]!.ts).toBe(6620); // anchorLocalMs(6500) + (1120 - 1000)
+  });
+
+  it("calm noteOn with a calm srvTs (latency 50 ≤ 200) → deferred sent (NOT fallback)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
+      performerTs: 1000,
       srvTs: 1000,
       receivedAtMs: 1050,
     }, 5000);
     expect(r.outcome).toBe("sent");
-    expect(out.sends[0]!.ts).toBe(5040); // lookahead, not immediate
+    expect(out.sends[0]!.ts).toBe(6500); // deferred, not immediate
+  });
+
+  it("a non-finite performerTs (undefined / NaN) → imminent fallback send at now + LOOKAHEAD_MS", () => {
+    // The schema's z.number() accepts NaN; an undefined/NaN performerTs must NOT
+    // poison the anchor → safe imminent send at now + 40 (the fallback target).
+    const out = recordingOutput();
+    const sch = createMidiScheduler();
+    const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), { type: "noteOn", performerTs: NaN, receivedAtMs: 1000 }, 5000);
+    expect(r.outcome).toBe("sent");
+    expect(out.sends[0]!.ts).toBe(5040); // imminent fallback (now + LOOKAHEAD)
   });
 });
 
 describe("createMidiScheduler — late fallback (noteOn / noteOff / programChange)", () => {
-  it("late noteOn (receivedAtMs - srvTs = 300 > 200) → fallback IMMEDIATE send(data, now)", () => {
+  it("schedule-late noteOn → fallback IMMEDIATE send(data, now)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
+    primeAnchor(sch);
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
+      performerTs: 1120,
       srvTs: 1000,
       receivedAtMs: 1300,
     }, 5000);
     expect(r.outcome).toBe("fallback");
     expect(r.late).toBe(true);
-    expect(r.latencyMs).toBe(300);
+    expect(r.latencyMs).toBe(300); // epoch telemetry preserved
     expect(out.sends).toHaveLength(1);
-    expect(out.sends[0]!.ts).toBe(5000); // immediate (now), NOT now + 40
+    expect(out.sends[0]!.ts).toBe(5000); // immediate (now), NOT deferred
   });
 
-  it("late noteOff → fallback IMMEDIATE send(data, now)", () => {
+  it("schedule-late noteOff → fallback IMMEDIATE send(data, now)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
+    primeAnchor(sch);
     const r = sch.schedule(out, new Uint8Array([0x80, 60, 0]), {
       type: "noteOff",
+      performerTs: 1120,
       srvTs: 1000,
       receivedAtMs: 1300,
     }, 5000);
@@ -347,11 +398,13 @@ describe("createMidiScheduler — late fallback (noteOn / noteOff / programChang
     expect(out.sends[0]!.ts).toBe(5000);
   });
 
-  it("late programChange → fallback IMMEDIATE send(data, now)", () => {
+  it("schedule-late programChange → fallback IMMEDIATE send(data, now)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
+    primeAnchor(sch);
     const r = sch.schedule(out, new Uint8Array([0xc0, 42]), {
       type: "programChange",
+      performerTs: 1120,
       srvTs: 1000,
       receivedAtMs: 1300,
     }, 5000);
@@ -360,22 +413,25 @@ describe("createMidiScheduler — late fallback (noteOn / noteOff / programChang
     expect(out.sends[0]!.ts).toBe(5000);
   });
 
-  it("fallbackCount flag: late noteOn/noteOff/programChange → outcome === 'fallback'", () => {
+  it("fallbackCount flag: schedule-late noteOn/noteOff/programChange → outcome === 'fallback'", () => {
     const sch = createMidiScheduler();
     const out = recordingOutput();
     for (const type of ["noteOn", "noteOff", "programChange"] as const) {
-      const r = sch.schedule(out, new Uint8Array([0x00]), { type, srvTs: 1000, receivedAtMs: 1300 }, 0);
+      primeAnchor(sch);
+      const r = sch.schedule(out, new Uint8Array([0x00]), { type, performerTs: 1120, srvTs: 1000, receivedAtMs: 1300 }, 5000);
       expect(r.outcome).toBe("fallback");
     }
   });
 });
 
 describe("createMidiScheduler — late drop (controlChange / pitchBend)", () => {
-  it("late controlChange → DROP (no send)", () => {
+  it("schedule-late controlChange → DROP (no send)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
+    primeAnchor(sch);
     const r = sch.schedule(out, new Uint8Array([0xb0, 74, 91]), {
       type: "controlChange",
+      performerTs: 1120,
       srvTs: 1000,
       receivedAtMs: 1300,
     }, 5000);
@@ -384,11 +440,13 @@ describe("createMidiScheduler — late drop (controlChange / pitchBend)", () => 
     expect(out.sends).toHaveLength(0); // dropped → no send
   });
 
-  it("late pitchBend → DROP (no send)", () => {
+  it("schedule-late pitchBend → DROP (no send)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
+    primeAnchor(sch);
     const r = sch.schedule(out, new Uint8Array([0xe0, 0, 64]), {
       type: "pitchBend",
+      performerTs: 1120,
       srvTs: 1000,
       receivedAtMs: 1300,
     }, 5000);
@@ -396,20 +454,22 @@ describe("createMidiScheduler — late drop (controlChange / pitchBend)", () => 
     expect(out.sends).toHaveLength(0);
   });
 
-  it("drop flag: late controlChange/pitchBend → outcome === 'dropped'", () => {
+  it("drop flag: schedule-late controlChange/pitchBend → outcome === 'dropped'", () => {
     const sch = createMidiScheduler();
     const out = recordingOutput();
     for (const type of ["controlChange", "pitchBend"] as const) {
-      const r = sch.schedule(out, new Uint8Array([0x00]), { type, srvTs: 1000, receivedAtMs: 1300 }, 0);
+      primeAnchor(sch);
+      const r = sch.schedule(out, new Uint8Array([0x00]), { type, performerTs: 1120, srvTs: 1000, receivedAtMs: 1300 }, 5000);
       expect(r.outcome).toBe("dropped");
     }
   });
 
-  it("calm controlChange (latency 50) → sent (only LATE CC is dropped)", () => {
+  it("calm controlChange (deferred, on slot) → sent (only SCHEDULE-LATE CC is dropped)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
     const r = sch.schedule(out, new Uint8Array([0xb0, 74, 91]), {
       type: "controlChange",
+      performerTs: 1000,
       srvTs: 1000,
       receivedAtMs: 1050,
     }, 5000);
@@ -420,48 +480,63 @@ describe("createMidiScheduler — late drop (controlChange / pitchBend)", () => 
 
 // --- boundaries --------------------------------------------------------------
 
-describe("createMidiScheduler — MAX_LATE_MS boundary (200 exact vs 201)", () => {
-  it("latency 200 ms exact → NOT late → lookahead send (now + 40)", () => {
+describe("createMidiScheduler — schedule-late boundary (target vs now + LOOKAHEAD_MS)", () => {
+  // Hotfix fidélité musicale — the late boundary is now SCHEDULE-late:
+  // `targetLocalMs < now + LOOKAHEAD_MS` (strict). target === now + LOOKAHEAD_MS
+  // is NOT late (deferred sent); target === now + LOOKAHEAD_MS - 1 IS late.
+  // Prime an anchor { 1000, 2500 }; at now 5000 the boundary is 5040.
+  it("target === now + LOOKAHEAD_MS → NOT late → deferred sent (5040)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
+    primeAnchor(sch); // anchor { 1000, 2500 }
+    // target = 2500 + (3540 - 1000) = 2500 + 2540 = 5040 === now(5000) + 40.
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
+      performerTs: 3540,
       srvTs: 1000,
-      receivedAtMs: 1200, // latency 200 (=== MAX_LATE_MS) → not late
+      receivedAtMs: 1200,
     }, 5000);
     expect(r.late).toBe(false);
     expect(r.outcome).toBe("sent");
-    expect(out.sends[0]!.ts).toBe(5040); // lookahead
+    expect(out.sends[0]!.ts).toBe(5040); // deferred at the boundary
   });
 
-  it("latency 201 ms → late → fallback send (now)", () => {
+  it("target === now + LOOKAHEAD_MS - 1 → late → fallback send (now)", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
+    primeAnchor(sch);
+    // target = 2500 + (3539 - 1000) = 5039 < 5040 → late.
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
+      performerTs: 3539,
       srvTs: 1000,
-      receivedAtMs: 1201, // latency 201 (> MAX_LATE_MS) → late
+      receivedAtMs: 1201,
     }, 5000);
     expect(r.late).toBe(true);
     expect(r.outcome).toBe("fallback");
     expect(out.sends[0]!.ts).toBe(5000); // immediate
   });
 
-  it("late CC at 201 ms → dropped; calm CC at 200 ms → sent", () => {
+  it("schedule-late CC → dropped; on-slot CC → sent", () => {
     const sch = createMidiScheduler();
+    primeAnchor(sch);
     const out1 = recordingOutput();
     const r1 = sch.schedule(out1, new Uint8Array([0xb0, 1, 2]), {
       type: "controlChange",
+      performerTs: 3539, // target 5039 < 5040 → late
       srvTs: 1000,
       receivedAtMs: 1201,
-    }, 0);
+    }, 5000);
     expect(r1.outcome).toBe("dropped");
+    // A fresh scheduler: a single CC with null anchor → target now + 1500 → sent.
+    const sch2 = createMidiScheduler();
     const out2 = recordingOutput();
-    const r2 = sch.schedule(out2, new Uint8Array([0xb0, 1, 2]), {
+    const r2 = sch2.schedule(out2, new Uint8Array([0xb0, 1, 2]), {
       type: "controlChange",
+      performerTs: 1000,
       srvTs: 1000,
       receivedAtMs: 1200,
-    }, 0);
+    }, 5000);
     expect(r2.outcome).toBe("sent");
   });
 });
@@ -511,17 +586,23 @@ describe("createMidiScheduler — bounded buffer 256 + drop oldest (FR-25)", () 
     expect(out.sends).toHaveLength(1000); // all calm → all sent
   });
 
-  it("dropped events do NOT enter the buffer (late CC keeps the buffer free)", () => {
+  it("dropped events do NOT enter the buffer (schedule-late CC keeps the buffer free)", () => {
+    // Hotfix fidélité musicale — 300 schedule-late CC are all dropped. A primed
+    // anchor occupies 1 buffer slot; the 300 dropped CC must NOT grow it. The
+    // test output captures 0 sends (all dropped).
     const out = recordingOutput();
     const sch = createMidiScheduler();
+    primeAnchor(sch); // 1 buffer slot, anchor { 1000, 2500 }
+    expect(sch.getBufferLength()).toBe(1);
     for (let i = 0; i < 300; i += 1) {
       sch.schedule(out, new Uint8Array([0xb0, 1, 2]), {
         type: "controlChange",
+        performerTs: 1120, // target 2620 < now(5000)+40 → schedule-late → dropped
         srvTs: 1000,
-        receivedAtMs: 1300, // late → dropped
-      }, 0);
+        receivedAtMs: 1300,
+      }, 5000);
     }
-    expect(sch.getBufferLength()).toBe(0); // dropped events never enter
+    expect(sch.getBufferLength()).toBe(1); // dropped events never enter the buffer
     expect(out.sends).toHaveLength(0); // all dropped
   });
 
@@ -553,73 +634,100 @@ describe("createMidiScheduler — Mock vs real output agnostic (MidiSendable)", 
 
 // --- Story 6.8 hotfix — cross-client clock domains (NFR-2 / NFR-19) ------------
 //
-// Proves the prod bug is fixed: the listener NEVER compares a performer
-// `performance.now()` with the listener/server clocks. Latency uses ONLY the
-// comparable epoch pair (`receivedAtMs` - `srvTs`, both `Date.now()`); scheduling
-// uses ONLY the local `performance.now()`. A wild performer `event.ts` is not
-// even an argument to the scheduler, so it cannot inflate latency.
+// Hotfix fidélité musicale — the performer `event.ts` (a `performance.now()`
+// from the PERFORMER's time origin) is now used, but ONLY as RELATIVE musical
+// time: the scheduler anchors the first event locally and reconstructs each
+// slot from `event.ts` DIFFERENCES. It is NEVER compared ABSOLUTELY to the
+// listener's `now` / the epoch `srvTs` / `receivedAtMs` (cross-client
+// `performance.now()` origins are not comparable — the Story 6.8 principle).
+// The epoch pair (`receivedAtMs` - `srvTs`) stays a SANE telemetry latency
+// (never ~1.78e12 garbage); the local `now` drives the deferred send target.
 
-describe("createMidiScheduler — cross-client clocks are NEVER compared (Story 6.8 hotfix)", () => {
-  it("latency is the epoch pair receivedAtMs - srvTs (sane ms), NOT ~1.78e12 garbage", () => {
+describe("createMidiScheduler — cross-client clocks are NEVER compared ABSOLUTELY (Story 6.8 hotfix)", () => {
+  it("epoch latency is the sane pair receivedAtMs - srvTs (ms), NOT ~1.78e12 garbage", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
-    // Realistic epoch ms (2026 ≈ 1.78e12). Server relayed 50 ms ago.
+    // Realistic epoch ms (2026 ≈ 1.78e12). Server relayed 50 ms ago. The
+    // performer ts is a tiny relative value; it does NOT inflate latency.
     const srvTs = 1_783_000_000_000;
     const receivedAtMs = 1_783_000_000_050;
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
+      performerTs: 1000,
       srvTs,
       receivedAtMs,
     }, 5000);
     expect(r.latencyMs).toBe(50); // sane — NOT 1.78e12
-    expect(r.late).toBe(false); // 50 ≤ 200 → calm → lookahead
+    expect(r.late).toBe(false); // on slot → calm → deferred sent
     expect(r.outcome).toBe("sent");
   });
 
-  it("a huge epoch latency (> 200) is late via the EPOCH pair, regardless of the local performance.now() `now`", () => {
+  it("schedule-late drives fallback at the LOCAL `now`; epoch latency stays sane telemetry", () => {
+    // The local `now` (5000) is tiny while the epoch latency is 300 (telemetry).
+    // Late is SCHEDULE-late (primed anchor → target 2620 < 5040), NOT derived
+    // from the epoch pair. The fallback fires at the LOCAL `now` (5000).
     const out = recordingOutput();
     const sch = createMidiScheduler();
-    // The local scheduling clock `now` (performance.now.) is tiny (5000) while
-    // the epoch latency is 300 (late). Proves latency is NOT derived from `now`.
+    primeAnchor(sch); // anchor { 1000, 2500 }
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
+      performerTs: 1120, // target 2620 < now(5000)+40 → schedule-late
       srvTs: 1_783_000_000_000,
-      receivedAtMs: 1_783_000_000_300, // epoch latency 300 > 200 → late
+      receivedAtMs: 1_783_000_000_300, // epoch latency 300 (telemetry)
     }, 5000);
-    expect(r.latencyMs).toBe(300);
-    expect(r.late).toBe(true);
+    expect(r.latencyMs).toBe(300); // epoch telemetry preserved, NOT 1.78e12
+    expect(r.late).toBe(true); // schedule-late, not epoch-late
     expect(r.outcome).toBe("fallback");
     expect(out.sends[0]!.ts).toBe(5000); // immediate fallback at the LOCAL `now`
   });
 
-  it("the scheduling target uses ONLY local performance.now() — epoch clocks do NOT leak into sendAt", () => {
+  it("the deferred send target uses the LOCAL `now` + PLAYBACK_DELAY_MS — epoch clocks do NOT leak into sendAt", () => {
     const out = recordingOutput();
     const sch = createMidiScheduler();
     // Epoch pair is ~1.78e12 (calm 50); local `now` is 5000. The send target
-    // MUST be 5000 + 40 = 5040 (local clock), NOT 1.78e12 + 40.
+    // MUST be 5000 + 1500 = 6500 (local clock + delay), NOT 1.78e12 + 1500.
     const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
       type: "noteOn",
+      performerTs: 1000,
       srvTs: 1_783_000_000_000,
       receivedAtMs: 1_783_000_000_050,
     }, 5000);
     expect(r.outcome).toBe("sent");
-    expect(out.sends[0]!.ts).toBe(5040); // local performance.now() + LOOKAHEAD
+    expect(out.sends[0]!.ts).toBe(6500); // local now + PLAYBACK_DELAY_MS
   });
 
-  it("ScheduleInfo has NO `ts` field — the performer performance.now() cannot drive late/fallback", () => {
-    // Compile-time + runtime guarantee: the only clocks the scheduler sees are
-    // `srvTs` (epoch) + `receivedAtMs` (epoch) + the local `now`. There is no
-    // `ts` parameter to mis-compare. Passing a performer `ts` is a type error.
+  it("a wild performer ts is used ONLY relatively — it cannot inflate the epoch latency", () => {
+    // A performer `event.ts` near 0 (page just loaded) anchors locally; the
+    // epoch latency is still the sane 50 ms pair. The ts does NOT leak into
+    // `latencyMs` (it would have produced ~1.78e12 garbage pre-hotfix).
+    const out = recordingOutput();
+    const sch = createMidiScheduler();
+    const r = sch.schedule(out, new Uint8Array([0x90, 60, 100]), {
+      type: "noteOn",
+      performerTs: 5, // wild performer performance.now() (page just loaded)
+      srvTs: 1_783_000_000_000,
+      receivedAtMs: 1_783_000_000_050,
+    }, 5000);
+    expect(r.latencyMs).toBe(50); // the wild ts did NOT inflate latency
+    expect(r.outcome).toBe("sent");
+    expect(out.sends[0]!.ts).toBe(6500); // anchored locally: now + delay
+  });
+
+  it("ScheduleInfo has NO `ts` field — `performerTs` is the relative field; a stray `ts` is rejected", () => {
+    // Compile-time + runtime guarantee: the relative field is `performerTs`
+    // (NOT `ts`). Passing a performer `ts` is a type error — `ts` is not a
+    // ScheduleInfo field, so it cannot be mis-compared to anything.
     const info = {
       type: "noteOn" as const,
+      performerTs: 1000,
       srvTs: 1_783_000_000_000,
       receivedAtMs: 1_783_000_000_300,
     };
-    // @ts-expect-error — `ts` is NOT a ScheduleInfo field (cross-client ts is rejected)
+    // @ts-expect-error — `ts` is NOT a ScheduleInfo field (use `performerTs`).
     info.ts = 42;
     const out = recordingOutput();
-    const r = createMidiScheduler().schedule(out, new Uint8Array([0x90, 60, 100]), info, 0);
-    expect(r.latencyMs).toBe(300); // the stray `ts` had no effect
+    const r = createMidiScheduler().schedule(out, new Uint8Array([0x90, 60, 100]), info, 5000);
+    expect(r.latencyMs).toBe(300); // the stray `ts` had no effect on latency
   });
 });
 

@@ -2,12 +2,12 @@
 // Story 5.2 — Panic integration: Mock output + server-down + real output.
 //
 // Proves the end-to-end behavior the AC demands:
-//   - Mock selected → click Panic → MockMidiOutput captures 64 messages AND
-//     MockByteStream displays them as CC lines (no hardware sound);
-//   - server-down → click Panic → 64 messages sent locally, with NO socket
+//   - Mock selected → click Panic → MockMidiOutput captures 192 messages (128
+//     noteOff channel sweep + 64 CC) AND MockByteStream displays them (no sound);
+//   - server-down → click Panic → 192 messages sent locally, with NO socket
 //     created / NO `socket.emit` (S-2 / AC-U13 — Panic is network-free);
 //   - a real output selected → click Panic → `output.send` is called exactly
-//     64 times with the AD-7 sweep (CC 64/120/121/123 × 16 channels);
+//     192 times (128 noteOff sweep + the AD-7 CC 64/120/121/123 × 16 channels);
 //   - no Force Panic / backpressure / buffer / drop / late alert is introduced.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
@@ -107,9 +107,9 @@ async function grant() {
 }
 
 // ============================================================================
-// Group A — Mock integration: 64 messages + MockByteStream CC lines + no sound
+// Group A — Mock integration: 192 messages (128 sweep + 64 CC) + MockByteStream lines + no sound
 // ============================================================================
-describe("Panic + Mock — 64 messages, CC lines on screen, no hardware sound", () => {
+describe("Panic + Mock — 192 messages (128 sweep + 64 CC), lines on screen, no hardware sound", () => {
   function renderMock() {
     return render(
       <MidiAccessProvider>
@@ -119,7 +119,7 @@ describe("Panic + Mock — 64 messages, CC lines on screen, no hardware sound", 
     );
   }
 
-  it("selecting Mock + clicking Panic → 64 messages captured + MockByteStream shows CC lines", () => {
+  it("selecting Mock + clicking Panic → 128 noteOff sweep + 64 CC captured + MockByteStream shows lines", () => {
     midiMock.nextOutputs = []; // NO real device — only Mock (no hardware sound).
     renderMock();
     act(() => {
@@ -129,22 +129,29 @@ describe("Panic + Mock — 64 messages, CC lines on screen, no hardware sound", 
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
 
-    // The shared Mock singleton captured exactly 64 messages.
+    // Hotfix fidélité musicale — normal Panic = 128-noteOff channel sweep
+    // (Option B) + the 64-CC sweep (5.2) = 192 messages (no tracked noteOffs
+    // here since no noteOn was played). Distinct from Force Panic (2048).
     const mock = getMockMidiOutput();
-    expect(mock.messages).toHaveLength(64);
+    expect(mock.messages).toHaveLength(192);
 
-    // The first 4 are channel 0 (status 0xB0) CC 64/120/121/123, value 0.
-    expect(Array.from(mock.messages[0]!.data)).toEqual([0xb0, 64, 0]);
-    expect(Array.from(mock.messages[3]!.data)).toEqual([0xb0, 123, 0]);
-    // The last is channel 15 (status 0xBF) CC 123.
-    expect(Array.from(mock.messages[63]!.data)).toEqual([0xbf, 123, 0]);
+    // The first 128 are noteOff `[0x80|ch, note, 0]` on the selected channel 0.
+    expect(Array.from(mock.messages[0]!.data)).toEqual([0x80, 0, 0]);
+    expect(Array.from(mock.messages[127]!.data)).toEqual([0x80, 127, 0]);
+    // The last 64 are the CC sweep. Index 128 = channel 0 CC 64; 131 = CC 123.
+    expect(Array.from(mock.messages[128]!.data)).toEqual([0xb0, 64, 0]);
+    expect(Array.from(mock.messages[131]!.data)).toEqual([0xb0, 123, 0]);
+    // The very last is channel 15 (status 0xBF) CC 123.
+    expect(Array.from(mock.messages[191]!.data)).toEqual([0xbf, 123, 0]);
 
-    // MockByteStream decoded + displayed all 64 as CC lines (data-type="cc").
+    // MockByteStream decoded + displayed all 192 lines: 128 noteOff + 64 cc.
     const lines = screen.getAllByTestId("listener-mock-byte-stream-line");
-    expect(lines).toHaveLength(64);
-    expect(lines[0]).toHaveAttribute("data-type", "cc");
-    expect(lines[0]).toHaveTextContent("cc · ch1 · 64 · 0"); // ch0 → UI ch1
-    expect(lines[63]).toHaveTextContent("cc · ch16 · 123 · 0"); // ch15 → UI ch16
+    expect(lines).toHaveLength(192);
+    expect(lines[0]).toHaveAttribute("data-type", "noteOff");
+    expect(lines[0]).toHaveTextContent("noteOff · ch1 · 0 · 0"); // ch0 → UI ch1
+    expect(lines[128]).toHaveAttribute("data-type", "cc");
+    expect(lines[128]).toHaveTextContent("cc · ch1 · 64 · 0");
+    expect(lines[191]).toHaveTextContent("cc · ch16 · 123 · 0"); // ch15 → UI ch16
   });
 
   it("produces NO hardware sound (0 real outputs; only the Mock singleton receives sends)", () => {
@@ -157,7 +164,7 @@ describe("Panic + Mock — 64 messages, CC lines on screen, no hardware sound", 
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
     // The only sink is the Mock singleton (a plain object with no audio access).
-    expect(getMockMidiOutput().messages).toHaveLength(64);
+    expect(getMockMidiOutput().messages).toHaveLength(192);
     // No real output port exists, so no hardware send could have happened.
     expect(midiMock.nextOutputs).toHaveLength(0);
   });
@@ -175,7 +182,7 @@ describe("Panic + server-down — local sweep, no socket created / no emit", () 
     );
   }
 
-  it("with the backend down, clicking Panic sends 64 messages locally (Mock)", () => {
+  it("with the backend down, clicking Panic sends 192 messages locally (Mock)", () => {
     renderPanic();
     act(() => {
       useListenerStore.getState().setFluxStatus("server-down");
@@ -184,7 +191,7 @@ describe("Panic + server-down — local sweep, no socket created / no emit", () 
     act(() => {
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
-    expect(getMockMidiOutput().messages).toHaveLength(64);
+    expect(getMockMidiOutput().messages).toHaveLength(192);
   });
 
   it("Panic NEVER creates a socket / calls `socket.emit` — `io` spy untouched", () => {
@@ -196,7 +203,7 @@ describe("Panic + server-down — local sweep, no socket created / no emit", () 
     act(() => {
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
-    expect(getMockMidiOutput().messages).toHaveLength(64);
+    expect(getMockMidiOutput().messages).toHaveLength(192);
     // The socket.io-client `io` factory was never called by Panic — there is
     // no socket to `.emit` on. Panic is fully network-free (S-2 / AC-U13).
     expect(ioSpy).not.toHaveBeenCalled();
@@ -204,9 +211,9 @@ describe("Panic + server-down — local sweep, no socket created / no emit", () 
 });
 
 // ============================================================================
-// Group C — real output: `output.send` called exactly 64 times (AD-7 sweep)
+// Group C — real output: `output.send` called 192 times (128 sweep + AD-7 CC)
 // ============================================================================
-describe("Panic + real output — `output.send` called 64 times with the AD-7 sweep", () => {
+describe("Panic + real output — `output.send` called 192 times (128 sweep + AD-7 CC)", () => {
   function renderReal() {
     return render(
       <MidiAccessProvider>
@@ -216,7 +223,7 @@ describe("Panic + real output — `output.send` called 64 times with the AD-7 sw
     );
   }
 
-  it("selecting a real port + clicking Panic → `output.send` called 64 times", async () => {
+  it("selecting a real port + clicking Panic → `output.send` called 192 times (128 sweep + 64 CC)", async () => {
     midiMock.nextOutputs = [makePort("o1", "Volca FM")];
     renderReal();
     await grant();
@@ -226,12 +233,16 @@ describe("Panic + real output — `output.send` called 64 times with the AD-7 sw
     act(() => {
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
-    expect(midiMock.sendSpy).toHaveBeenCalledTimes(64);
-    // First call: channel 0, CC 64, value 0.
+    // 128-noteOff channel sweep + 64-CC panic = 192 sends.
+    expect(midiMock.sendSpy).toHaveBeenCalledTimes(192);
+    // First call: channel 0 noteOff, note 0, value 0 (the Option B sweep).
     const first = midiMock.sendSpy.mock.calls[0]!;
-    expect(Array.from(first[0] as Uint8Array)).toEqual([0xb0, 64, 0]);
+    expect(Array.from(first[0] as Uint8Array)).toEqual([0x80, 0, 0]);
+    // The CC sweep starts at index 128: channel 0, CC 64, value 0.
+    const ccFirst = midiMock.sendSpy.mock.calls[128]!;
+    expect(Array.from(ccFirst[0] as Uint8Array)).toEqual([0xb0, 64, 0]);
     // Last call: channel 15, CC 123, value 0.
-    const last = midiMock.sendSpy.mock.calls[63]!;
+    const last = midiMock.sendSpy.mock.calls[191]!;
     expect(Array.from(last[0] as Uint8Array)).toEqual([0xbf, 123, 0]);
     // No socket created during the real-output Panic either.
     expect(ioSpy).not.toHaveBeenCalled();

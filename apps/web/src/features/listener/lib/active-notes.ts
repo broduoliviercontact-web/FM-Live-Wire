@@ -219,3 +219,35 @@ export function sendOutputTrackedNoteOffs(
     sendTrackedNoteOffs(output, notes, channel, now);
   }
 }
+
+/**
+ * Send a BLANKET of 128 noteOff `[0x80|channel, note, 0]` (note 0–127) on ONE
+ * channel, each `output.send(bytes, now)` immediate, best-effort (per-note
+ * try/catch). This is the deferred-playback safety net (Option B):
+ *
+ * With deferred playback, `output.send(data, futureTimestamp)` schedules messages
+ * in the FUTURE, and `MIDIOutput.clear()` cancels them. But `clear()` also cancels
+ * a DEFERRED noteOff that was scheduled (not yet fired) for a still-sounding note.
+ * The active-note tracker removes a note at the noteOff's SCHEDULE time (not its
+ * FIRE time), so after `clear()` the tracker believes the note is already
+ * released — and sends no explicit noteOff — while the deferred noteOn still
+ * fires → stuck note. A blanket 128-noteOff sweep on the relevant channel after
+ * `clear()` guarantees every note on that channel is cut, regardless of tracker
+ * state. 128 messages on one channel is light (vs the 2048-message Force Panic
+ * which sweeps all 16 channels); it keeps the normal Panic distinct from Force
+ * Panic. Pure + injectable `now`.
+ */
+export function sendChannelNoteOffSweep(
+  output: MidiSendable,
+  channel: number,
+  now: number,
+): void {
+  const status = 0x80 | channel; // noteOff on this channel
+  for (let note = 0; note <= 127; note += 1) {
+    try {
+      output.send(new Uint8Array([status, note, 0]), now);
+    } catch {
+      // Best-effort: a throw on one note does not abort the sweep.
+    }
+  }
+}

@@ -52,14 +52,16 @@ import { create } from "zustand";
 // and `eventsReceived` / `noteOnPulse` from incoming events.
 //
 // Story 5.4 — backpressure telemetry (AD-11, FR-25/26/27, UX-DR12/14):
-//   - `lastLatencyMs` : the last EFFECTIVE downstream latency
-//                      `max(0, receivedAtMs - srvTs)` (ms, both epoch
-//                      `Date.now()` — comparable, Story 6.8 hotfix), clamped to
-//                      0 so server/client clock skew never yields a negative
-//                      value, or `null` when the last event had no `srvTs`.
-//                      Telemetry only (AD-11) — `srvTs` is never re-loged. The
-//                      performer `event.ts` is NOT used (cross-client
-//                      `performance.now()` is never comparable).
+//   - `lastLatencyMs` : Hotfix fidélité musicale — now the last restitution
+//                      RETARD `max(0, now - targetLocalMs)` (ms past the musical
+//                      slot; 0 when on time), set from `ScheduleResult.scheduleLateMs`.
+//                      Coherent with the schedule-late trigger (the deferred
+//                      buffer could not absorb the jitter). The FIELD NAME + UI
+//                      label are unchanged so direct-setter unit tests stay green;
+//                      only the semantics shift from epoch latency to retard.
+//                      The epoch `receivedAtMs - srvTs` latency is still computed
+//                      inside the scheduler as internal telemetry (AD-11) but no
+//                      longer drives the UI/alert. Telemetry only — never re-loged.
 //   - `lateWarning`  : a LOCAL late / overload warning is active (latency >
 //                      `MAX_LATE_MS` OR buffer overflow → drop oldest). Drives
 //                      `LateAlert` + `LatencyStat` (alerte-only, hidden by
@@ -118,7 +120,7 @@ export interface ListenerState {
    * Sticky (a stale build cannot recover without a page refresh).
    */
   readonly protocolError: boolean;
-  /** Story 5.4 — last downstream latency `receivedAtMs - srvTs` (ms, epoch pair), or `null` (no `srvTs`). */
+  /** Hotfix fidélité musicale — last restitution retard `max(0, now - targetLocalMs)` (ms; 0 on time), or `null` initially. */
   readonly lastLatencyMs: number | null;
   /** Story 5.4 — LOCAL late/overload warning active (FR-27, UX-DR14). */
   readonly lateWarning: boolean;
@@ -149,7 +151,7 @@ export interface ListenerState {
   readonly pulseNoteOn: () => void;
   /** Set / clear the protocol-error flag (Story 4.5 E13). */
   readonly setProtocolError: (b: boolean) => void;
-  /** Story 5.4 — set the last relay latency (ms, or null). Telemetry only. */
+  /** Hotfix fidélité musicale — set the last restitution retard (ms, or null). Telemetry only. */
   readonly setLastLatencyMs: (ms: number | null) => void;
   /** Story 5.4 — set / clear the LOCAL late/overload warning (FR-27). */
   readonly setLateWarning: (b: boolean) => void;

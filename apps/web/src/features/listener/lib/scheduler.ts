@@ -72,8 +72,14 @@
 // `event → remap → encode → schedule → output.send` is identical for the Mock
 // singleton and a hardware port. No Mock-specific branch lives here.
 
-import { LOOKAHEAD_MS, MAX_LATE_MS, BUFFER_CAP } from "../../../config/runtime";
+import { LOOKAHEAD_MS, MAX_LATE_MS, BUFFER_CAP, PLAYBACK_DELAY_MS } from "../../../config/runtime";
 import type { MidiSendable } from "./sendable";
+import {
+  computeTargetLocalMs,
+  isScheduleLate,
+  scheduleLateMs,
+  type Anchor,
+} from "./playback";
 
 /** The 5 channel-voice message types (mirrors `MidiEvent["type"]`). */
 export type MidiEventType =
@@ -107,11 +113,30 @@ export interface ScheduleResult {
    * reception wiring checks this to skip telemetry + alerts for a stopped event.
    */
   readonly stopped?: boolean;
+  /**
+   * Hotfix fidélité musicale — how far past its musical slot the event was, in ms
+   * (`max(0, now - targetLocalMs)`; 0 when on time). The reception wiring stores
+   * this as `lastLatencyMs` so `LateAlert` / `LatencyStat` display the restitution
+   * retard, coherent with the schedule-late trigger (the buffer could not absorb
+   * the jitter). Distinct from the epoch network latency (`latencyMs`).
+   */
+  readonly scheduleLateMs: number;
 }
 
 /** Info needed to schedule one event (besides the raw bytes + the output). */
 export interface ScheduleInfo {
   readonly type: MidiEventType;
+  /**
+   * Hotfix fidélité musicale — the performer's `event.ts` (its `event.timeStamp`,
+   * a `performance.now()`-relative MONOTONIC value from the PERFORMER's time
+   * origin). Used ONLY as RELATIVE musical time: the scheduler anchors the first
+   * event to `now + PLAYBACK_DELAY_MS` and plays each event at
+   * `anchorLocalMs + max(0, performerTs - anchorPerformerTs)`. It is NEVER
+   * compared absolutely to the listener's `now` / the epoch `srvTs` / `receivedAtMs`
+   * (cross-client `performance.now()` origins are not comparable — Story 6.8
+   * hotfix principle). Non-finite (NaN/Infinity) → safe imminent fallback.
+   */
+  readonly performerTs: number;
   /** Server relay timestamp, epoch ms (`Date.now()` server-side). Telemetry only, AD-11. Absent → no latency check. */
   readonly srvTs?: number;
   /**
@@ -190,6 +215,14 @@ export interface BackpressureInput {
 }
 
 /**
+ * The backpressure decision WITHOUT the deferred-restitution retard. The
+ * scheduler factory merges `scheduleLateMs` in after the send (it depends on
+ * the deferred target, which the pure decision does not know). Tests of the
+ * pure `decideBackpressure` see exactly these four fields.
+ */
+export type BackpressureResult = Omit<ScheduleResult, "scheduleLateMs">;
+
+/**
  * Pure backpressure decision: given the event (type + latency) and the current
  * pending-buffer length, decide the new event's fate. No clock, no output, no
  * side effect — fully deterministic and unit-testable.
@@ -200,7 +233,7 @@ export interface BackpressureInput {
  */
 export function decideBackpressure(
   input: BackpressureInput,
-): ScheduleResult {
+): BackpressureResult {
   const bufferOverflow = input.bufferLength >= BUFFER_CAP;
   if (input.late) {
     if (shouldFallbackOnLate(input.type)) {
@@ -262,7 +295,17 @@ export interface MidiScheduler {
   start(): void;
   /** Story 5.5 — `true` when the scheduler is STOPPED (fail-safe gate active). */
   isStopped(): boolean;
-  /** Reset the pending buffer + stopped flag (factory reset / test isolation). */
+  /**
+   * Hotfix fidélité musicale — forget the deferred-playback anchor ONLY (the
+   * pending buffer + stopped flag are untouched). The next event re-establishes
+   * the anchor (`anchorLocalMs = now + PLAYBACK_DELAY_MS`). Called on output
+   * change / channel change / normal Panic / Force Panic / performer-disconnect,
+   * where the scheduler is NOT stopped (so `stop`/`start` cannot do the reset).
+   * The leave / output-lost / reconnect paths clear the anchor via `stop()` /
+   * `start()` / `reset()`.
+   */
+  resetAnchor(): void;
+  /** Reset the pending buffer + stopped flag + anchor (factory reset / test isolation). */
   reset(): void;
 }
 
@@ -298,6 +341,11 @@ export function createMidiScheduler(
 ): MidiScheduler {
   let bufferLength = 0;
   let stopped = false;
+  // Hotfix fidélité musicale — the deferred-playback anchor (null until the
+  // first finite event). Reset by `resetAnchor()` (output/channel change, Panic,
+  // performer-disconnect) and by `stop()`/`start()`/`reset()` (leave, output-lost,
+  // reconnect, test isolation). The next event re-establishes it.
+  let anchor: Anchor | null = null;
 
   /**
    * Send `data` to `output` at `ts`, wrapped in a fail-safe try/catch (Story
@@ -332,10 +380,29 @@ export function createMidiScheduler(
           latencyMs: effectiveLatencyMs(info.srvTs, info.receivedAtMs),
           bufferOverflow: false,
           stopped: true,
+          scheduleLateMs: 0,
         };
       }
+      // Hotfix fidélité musicale — deferred playback target. The performer
+      // `event.ts` is used ONLY as RELATIVE musical time (anchored locally); it
+      // is never compared absolutely to `now` / `srvTs` / `receivedAtMs`. The
+      // anchor is established on the first finite event and stored for the next
+      // call. A non-finite `performerTs` falls back to an imminent send and does
+      // NOT poison the anchor (see `lib/playback.ts`).
+      const { targetLocalMs, anchor: nextAnchor } = computeTargetLocalMs(
+        info.performerTs,
+        anchor,
+        now,
+        PLAYBACK_DELAY_MS,
+      );
+      anchor = nextAnchor;
+      // "Late" is now SCHEDULE-late: the deferred buffer could not absorb the
+      // arrival jitter, so the event's musical slot is already past (or within
+      // the lookahead). This drives the fallback/drop decision + the LateAlert
+      // trigger. The EPOCH network latency (`effectiveLatencyMs`) is computed
+      // separately as telemetry only (it no longer drives the decision).
+      const late = isScheduleLate(targetLocalMs, now);
       const latencyMs = effectiveLatencyMs(info.srvTs, info.receivedAtMs);
-      const late = isLate(latencyMs);
       const result = decideBackpressure({
         type: info.type,
         latencyMs,
@@ -350,32 +417,43 @@ export function createMidiScheduler(
       }
       // Execute the fate (wrapped so a throw triggers the fail-safe).
       if (result.outcome === "sent") {
-        safeSend(output, data, now + LOOKAHEAD_MS);
+        // Deferred: send at the reconstructed musical slot (anchor + relative).
+        safeSend(output, data, targetLocalMs);
       } else if (result.outcome === "fallback") {
-        safeSend(output, data, now); // immediate — the note / program is NOT lost
+        // Schedule-late noteOn/noteOff/programChange → imminent (NOT lost, FR-26).
+        safeSend(output, data, now);
       }
-      // outcome === "dropped" → no send (late CC / pitchBend).
-      return result;
+      // outcome === "dropped" → no send (schedule-late CC / pitchBend).
+      return { ...result, scheduleLateMs: scheduleLateMs(targetLocalMs, now) };
     },
     getBufferLength(): number {
       return bufferLength;
     },
     stop(): void {
       stopped = true;
+      anchor = null; // a fresh session re-anchors on the first event after start
     },
     start(): void {
       // Resume LIVE reception: clear the gate AND reset the pending count (no
       // stale backlog is ever flushed — nothing is queued, so no replay, AD-17).
       stopped = false;
       bufferLength = 0;
+      anchor = null; // re-anchor on the first event after a reconnect
     },
     isStopped(): boolean {
       return stopped;
     },
+    resetAnchor(): void {
+      // Forget the deferred-playback anchor ONLY (buffer + gate untouched). The
+      // next event re-anchors. Used on output/channel change / Panic /
+      // performer-disconnect where the scheduler is NOT stopped.
+      anchor = null;
+    },
     reset(): void {
-      // Full factory reset (test isolation): buffer cleared + gate open.
+      // Full factory reset (test isolation): buffer cleared + gate open + anchor.
       bufferLength = 0;
       stopped = false;
+      anchor = null;
     },
   };
 }

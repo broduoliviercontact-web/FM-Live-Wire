@@ -381,12 +381,14 @@ describe("Story 5.5 — output lost via state:disconnected (port still listed)",
     act(() => {
       socket.fireServer("midi:event", noteOn(2, 62, 2000));
     });
-    // Anti-stuck-notes safety: handleOutputLost sent a best-effort tracked noteOff
-    // for the sounding note 60 to the OLD output (the port stayed in the map, still
-    // sendable) — so the count is 2 (baseline noteOn + safety noteOff), NOT 1. The
-    // subsequent event adds 0 (scheduler stopped). (Hot-unplug via DELETE — Group A
-    // — stays 1: the old output is gone, nothing to send to.)
-    expect(midiMock.sendSpy).toHaveBeenCalledTimes(2);
+    // Anti-stuck-notes safety (Hotfix fidélité musicale — Option B): handleOutputLost
+    // sent a best-effort tracked noteOff for the sounding note 60 PLUS a 128-noteOff
+    // channel sweep to the OLD output (the port stayed in the map, still sendable) —
+    // so the count is 1 (baseline noteOn) + 1 (tracked noteOff) + 128 (sweep) = 130,
+    // NOT 1. The subsequent event adds 0 (scheduler stopped). (Hot-unplug via DELETE
+    // — Group A — stays 1: the old output is gone, getOutputRef returns null, nothing
+    // to send to.)
+    expect(midiMock.sendSpy).toHaveBeenCalledTimes(1 + 1 + 128);
   });
 });
 
@@ -487,17 +489,23 @@ describe("Story 5.5 — server-down → scheduler stopped + Panic active", () =>
       "listener-panic-button",
     ) as HTMLButtonElement;
     expect(panicBtn).not.toBeDisabled();
-    // Panic bypasses the scheduler → 64 sends locally even with it stopped.
+    // Panic bypasses the scheduler → 192 sends locally (128-noteOff Option B sweep
+    // + 64-CC panic) even with it stopped.
     const joinEmitsBefore = lastConnect.socket!.emitCalls.filter(
       (c) => c.ev === "room:join",
     ).length;
     act(() => {
       fireEvent.click(panicBtn);
     });
-    expect(midiMock.sendSpy).toHaveBeenCalledTimes(64);
+    expect(midiMock.sendSpy).toHaveBeenCalledTimes(192);
+    // First: channel 0 noteOff, note 0 (the Option B blanket sweep).
     const first = midiMock.sendSpy.mock.calls[0]!;
-    expect(Array.from(first[0] as Uint8Array)).toEqual([0xb0, 64, 0]);
-    const last = midiMock.sendSpy.mock.calls[63]!;
+    expect(Array.from(first[0] as Uint8Array)).toEqual([0x80, 0, 0]);
+    // The 64-CC panic sweep starts at index 128: channel 0 CC 64.
+    const ccFirst = midiMock.sendSpy.mock.calls[128]!;
+    expect(Array.from(ccFirst[0] as Uint8Array)).toEqual([0xb0, 64, 0]);
+    // Last: channel 15 CC 123.
+    const last = midiMock.sendSpy.mock.calls[191]!;
     expect(Array.from(last[0] as Uint8Array)).toEqual([0xbf, 123, 0]);
     // No NEW `room:join` while down (Panic is network-free, S-2): the count is
     // unchanged by the Panic click (the only room:join is the join-phase one).
@@ -632,22 +640,33 @@ describe("Story 5.5 — non-regression (Mock / Panic / LateAlert LOCAL)", () => 
     ).not.toBeInTheDocument();
   });
 
-  it("5.4 LateAlert stays LOCAL — a late event raises the alert + NO `listener:overload` is ever emitted", async () => {
+  it("5.4 LateAlert stays LOCAL — a SCHEDULE-LATE event raises the alert + NO `listener:overload` is ever emitted", async () => {
     midiMock.nextOutputs = [makePort("o1", "Volca FM")];
     const socket = await joinReal("o1");
-    // A late event (srvTs far after ts → latency > MAX_LATE_MS) raises LateAlert.
+    // Hotfix fidélité musicale — "late" is now SCHEDULE-late (the deferred buffer
+    // could not absorb the jitter), NOT epoch network latency. A single event
+    // always anchors to now + PLAYBACK_DELAY_MS (the future) → never late, so we
+    // PRIME an anchor with a calm noteOn at now 5000 (ts 1000 → anchor {1000,6500}),
+    // then ADVANCE performance.now() to 7000 and fire the event under test
+    // (ts 1120 → target 6620 < 7040 → schedule-late). The epoch srvTs is telemetry
+    // only now (it no longer drives the alert).
+    const nowSpy = vi.spyOn(performance, "now").mockReturnValue(5000);
+    act(() => {
+      socket.fireServer("midi:event", noteOn(1, 60, 1000)); // prime anchor {1000,6500}
+    });
+    nowSpy.mockReturnValue(7000); // advance past the slot
     act(() => {
       socket.fireServer("midi:event", {
         type: "noteOn",
         channel: 5,
         note: 60,
         velocity: 100,
-        seq: 1,
-        ts: 1000,
+        seq: 2,
+        ts: 1120, // target 6500 + 120 = 6620 < now(7000)+40 → schedule-late
         v: PROTOCOL_VERSION,
         roomId: ROOM,
         performerId: "srv-owner",
-        srvTs: 9999, // latency ~8999 ms → late
+        srvTs: 9999, // epoch telemetry only — no longer drives the late decision
       });
     });
     expect(useListenerStore.getState().lateWarning).toBe(true);
@@ -657,14 +676,16 @@ describe("Story 5.5 — non-regression (Mock / Panic / LateAlert LOCAL)", () => 
     expect(emittedEvents).not.toContain(OVERLOAD_EVENT);
     // Only the join lifecycle events were emitted (no new server event).
     expect(emittedEvents.every((ev) => ev === "room:join")).toBe(true);
+    nowSpy.mockRestore();
   });
 
-  it("5.2 Panic still sweeps 64 messages locally to a real output (no scheduler)", async () => {
+  it("5.2 Panic still sweeps 192 messages locally to a real output (128 sweep + 64 CC, no scheduler)", async () => {
     midiMock.nextOutputs = [makePort("o1", "Volca FM")];
     await joinReal("o1");
     act(() => {
       fireEvent.click(screen.getByTestId("listener-panic-button"));
     });
-    expect(midiMock.sendSpy).toHaveBeenCalledTimes(64);
+    // Hotfix fidélité musicale — Option B: 128-noteOff channel sweep + 64-CC panic.
+    expect(midiMock.sendSpy).toHaveBeenCalledTimes(192);
   });
 });

@@ -20,6 +20,7 @@ import {
   sendTrackedNoteOffs,
   sendChannelAllNotesOff,
   sendOutputTrackedNoteOffs,
+  sendChannelNoteOffSweep,
 } from "../features/listener/lib/active-notes";
 import type { MidiSendable } from "../features/listener/lib/sendable";
 
@@ -298,6 +299,44 @@ describe("sendOutputTrackedNoteOffs — per-channel sweep over an output", () =>
     const out = recordingOutput();
     sendOutputTrackedNoteOffs(out, new Map(), 1);
     expect(out.sends).toHaveLength(0);
+  });
+});
+
+describe("sendChannelNoteOffSweep — 128 noteOff blanket on one channel (Option B)", () => {
+  // Hotfix fidélité musicale — the deferred-playback safety net. After
+  // `clear()`, a deferred noteOff the tracker already forgot is cancelled; a
+  // blanket 128-noteOff sweep guarantees every note on the channel is cut.
+  it("sends exactly 128 noteOff `[0x80|ch, note, 0]` for note 0–127", () => {
+    const out = recordingOutput();
+    sendChannelNoteOffSweep(out, 4, 9999);
+    expect(out.sends).toHaveLength(128);
+    for (let i = 0; i < out.sends.length; i += 1) {
+      const s = out.sends[i]!;
+      expect(s.data[0]).toBe(0x84); // 0x80 | 4
+      expect(s.data[1]).toBe(i); // note 0..127 in order
+      expect(s.data[2]).toBe(0); // velocity 0
+      expect(s.ts).toBe(9999); // the given timestamp
+    }
+  });
+
+  it("uses the channel in the status byte (0x80 | channel)", () => {
+    const out = recordingOutput();
+    sendChannelNoteOffSweep(out, 15, 1);
+    expect(out.sends).toHaveLength(128);
+    expect(out.sends.every((s) => s.data[0] === 0x8f)).toBe(true); // 0x80 | 15
+  });
+
+  it("a throw on one note does not abort the sweep and never propagates", () => {
+    const out = partialThrowingOutput(new Set([60])); // throws on note 60
+    expect(() => sendChannelNoteOffSweep(out, 0, 7)).not.toThrow();
+    // 128 attempted, 1 threw → 127 recorded.
+    expect(out.sends).toHaveLength(127);
+    expect(out.sends.map((s) => s.data[1])).not.toContain(60);
+  });
+
+  it("an output that always throws is fully swallowed (no propagation)", () => {
+    const out = alwaysThrowingOutput();
+    expect(() => sendChannelNoteOffSweep(out, 0, 1)).not.toThrow();
   });
 });
 

@@ -6,8 +6,8 @@
 // encode. socket.io-client is mocked (fake socket: records emits, fires server
 // events + acks). Web MIDI is mocked home-typed so a real output port can be
 // selected and `send` observed. `performance.now()` is spied to 1000 so the
-// scheduled timestamp is deterministic (1000 + 40 = 1040). No real network, no
-// hardware port.
+// deferred send timestamp is deterministic (1000 + PLAYBACK_DELAY_MS 1500 = 2500).
+// No real network, no hardware port.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import {
@@ -181,16 +181,16 @@ afterEach(() => {
 });
 
 describe("Listener reception — midi:event → remap → toMidiBytes → send", () => {
-  it("a relayed noteOn (canal 5) on listener canal 1 (data 0) → send([0x90,60,100], 1040)", async () => {
+  it("a relayed noteOn (canal 5) on listener canal 1 (data 0) → send([0x90,60,100], 2500)", async () => {
     renderFlow();
     const socket = await join();
 
     // Server relays the midi:event WITH envelope fields (performerId, srvTs).
-    // Story 6.8 hotfix: latency = receivedAtMs(Date.now()=1100) - srvTs(1050) = 50
-    // ms ≤ 200 → calm → lookahead. The performer `ts` below is a wild
-    // performance.now()-relative value (5 ms from page load) — it is IGNORED for
-    // late/fallback (cross-client performance.now() is never compared). This
-    // proves the lookahead + remap, not the late path.
+    // Hotfix fidélité musicale: the performer `ts` (5, a performance.now()-relative
+    // value) is used ONLY as RELATIVE musical time. The first event anchors to
+    // performance.now() (1000) + PLAYBACK_DELAY_MS (1500) = 2500 locally; its
+    // relative offset is 0 (ts 5 - anchor 5), so the deferred send target is 2500.
+    // The epoch latency (Date.now()=1100 - srvTs=1050 = 50 ms) is telemetry only.
     const relayed = {
       type: "noteOn" as const,
       channel: 5,
@@ -212,8 +212,8 @@ describe("Listener reception — midi:event → remap → toMidiBytes → send",
     // Status byte 0x90 (noteOn, canal 0 — the original canal 5 was remapped to
     // the listener's forced canal data 0). note + velocity preserved.
     expect(Array.from(data)).toEqual([0x90, 60, 100]);
-    // Timestamp = performance.now() (1000) + LOOKAHEAD_MS (40) = 1040.
-    expect(ts).toBe(1040);
+    // Deferred target = performance.now() (1000) + PLAYBACK_DELAY_MS (1500) = 2500.
+    expect(ts).toBe(2500);
   });
 
   it("uses the listener's forced canal (data 15) when the store channel changes mid-session", async () => {

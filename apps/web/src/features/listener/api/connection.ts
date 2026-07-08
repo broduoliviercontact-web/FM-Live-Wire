@@ -18,6 +18,7 @@ import {
   sendOutputTrackedNoteOffs,
   sendTrackedNoteOffs,
   sendChannelAllNotesOff,
+  sendChannelNoteOffSweep,
 } from "../lib/active-notes";
 import { sendLocalPanic } from "../lib/panic";
 import { sendForcePanic } from "../lib/force-panic";
@@ -102,10 +103,35 @@ const listenerScheduler = createMidiScheduler({
 const activeNoteTracker = createActiveNoteTracker();
 
 /**
+ * Hotfix fidélité musicale — best-effort cancel all PENDING SCHEDULED sends on
+ * `output` (Web MIDI `MIDIOutput.clear()`). With deferred playback, noteOns/
+ * noteOffs are scheduled in the FUTURE; before a port change / channel change /
+ * Panic / output-lost / leave, those pending sends on the OLD output MUST be
+ * cancelled so a deferred noteOn does not fire AFTER the immediate safety
+ * noteOffs (which would re-trigger a stuck note). `clear()` is OPTIONAL on
+ * `MidiSendable` (absent on the Mock, which records sends immediately — no
+ * pending queue); guarded with a typeof check + try/catch so a dead port's
+ * throw never blocks the safety. Always called BEFORE the safety sends below.
+ */
+function clearSendable(output: MidiSendable): void {
+  try {
+    output.clear?.();
+  } catch {
+    // Best-effort: the port may already be gone (a throw here is fine).
+  }
+}
+
+/**
  * Best-effort: send tracked noteOffs for the CURRENTLY selected output's active
  * notes + the local CC panic sweep, then clear the tracker. Used by the voluntary
  * leave / navigation paths (the output is still resolvable there). Each send is
  * individually guarded inside the helpers — a throw never propagates to the UI.
+ *
+ * Hotfix fidélité musicale — also `clear()` pending deferred sends AND a 128-
+ * noteOff sweep on the selected channel BEFORE the tracked noteOffs + CC panic.
+ * `clear()` cancels deferred noteOffs the tracker already forgot (Option B: a
+ * blanket sweep guarantees every note on the channel is cut, regardless of
+ * tracker state). Order: `clear()` → tracked noteOffs → 128 sweep → CC panic.
  */
 function sendSafetyPanicOnCurrentOutput(): void {
   const store = useListenerStore.getState();
@@ -118,11 +144,14 @@ function sendSafetyPanicOnCurrentOutput(): void {
   if (getOutput !== null) {
     const output = getOutput(outId);
     if (output !== null) {
+      clearSendable(output);
+      const now = performance.now();
       sendOutputTrackedNoteOffs(
         output,
         activeNoteTracker.getNotesForOutput(outId),
-        performance.now(),
+        now,
       );
+      sendChannelNoteOffSweep(output, store.channel, now);
       try {
         sendLocalPanic(output);
       } catch {
@@ -158,16 +187,23 @@ export function handleOutputLost(): void {
     if (getOutput !== null) {
       const oldOut = getOutput(oldId);
       if (oldOut !== null) {
+        clearSendable(oldOut);
+        const now = performance.now();
         sendOutputTrackedNoteOffs(
           oldOut,
           activeNoteTracker.getNotesForOutput(oldId),
-          performance.now(),
+          now,
         );
+        // Option B — blanket 128 noteOff on the OLD output + selected channel.
+        // Best-effort (the port is dying): a throw on one note does not abort
+        // the sweep. Covers deferred noteOffs `clear()` cancelled that the
+        // tracker already forgot.
+        sendChannelNoteOffSweep(oldOut, store.channel, now);
       }
     }
     activeNoteTracker.clearOutput(oldId);
   }
-  listenerScheduler.stop();
+  listenerScheduler.stop(); // also clears the deferred anchor
   if (oldId !== null) store.setSelectedOutput(null);
   store.setOutputLost(true);
 }
@@ -257,6 +293,14 @@ function handleMidiEvent(event: MidiEvent): void {
   const srvTs = (event as unknown as { srvTs?: number }).srvTs;
   const result: ScheduleResult = listenerScheduler.schedule(output, bytes, {
     type: event.type,
+    // Hotfix fidélité musicale — the performer `event.ts` (a `performance.now()`
+    // from the PERFORMER's time origin) is used ONLY as RELATIVE musical time
+    // (the scheduler anchors the first event locally + reconstructs each slot
+    // from `event.ts` differences). It is NEVER compared absolutely to the
+    // listener's clocks. `event.ts` is a required commonField on every relayed
+    // event, so it is type-safe to read directly (unlike the optional `srvTs`
+    // envelope field read via cast above).
+    performerTs: event.ts,
     receivedAtMs: Date.now(),
     ...(srvTs !== undefined ? { srvTs } : {}),
   });
@@ -286,7 +330,11 @@ function handleMidiEvent(event: MidiEvent): void {
   if (result.bufferOverflow) store.incDropped();
   if (result.outcome === "fallback") store.incFallback();
   if (result.outcome === "dropped") store.incDropped();
-  store.setLastLatencyMs(result.latencyMs);
+  // Hotfix fidélité musicale — the displayed value is the restitution RETARD
+  // (`scheduleLateMs`: how far past its musical slot the event was, 0 on time),
+  // coherent with the schedule-late trigger. The epoch `latencyMs` is computed
+  // inside the scheduler as telemetry but no longer drives the UI/alert.
+  store.setLastLatencyMs(result.scheduleLateMs);
   store.setLateWarning(result.late || result.bufferOverflow);
 }
 
@@ -348,6 +396,13 @@ export function ensureListenerSocket(): Socket {
     },
     onPerformerDisconnected: () => {
       // E7: the performer (owner) left. Not an app crash — stay joined.
+      // Hotfix fidélité musicale — the listener socket stays connected at
+      // performer turnover, but the NEXT performer's `event.ts` is a fresh
+      // `performance.now()` (~0) vs the OLD anchor (potentially huge) →
+      // `relativeMs` clamps 0 → `targetLocalMs` in the past → permanent
+      // schedule-late. Reset the anchor here so the first event from the new
+      // performer re-anchors locally.
+      listenerScheduler.resetAnchor();
       useListenerStore.getState().setFluxStatus("performer-disconnected");
     },
     // reconnect_attempt: the server-down pill already says "Reconnexion
@@ -373,6 +428,9 @@ export function joinFlux(): void {
       const s = useListenerStore.getState();
       s.setJoined(true);
       s.setFluxStatus("waiting");
+      // Hotfix fidélité musicale — (re)join starts a fresh musical session:
+      // reset the deferred anchor so the first event re-anchors locally.
+      listenerScheduler.resetAnchor();
     }
   });
 }
@@ -503,11 +561,19 @@ export function selectListenerOutput(
   if (oldId !== null && oldId !== newId) {
     const oldOut = resolveOutput(oldId);
     if (oldOut !== null) {
+      // Hotfix fidélité musicale — Option B order: cancel pending deferred
+      // sends FIRST (a deferred noteOn on the OLD output must not fire AFTER
+      // the immediate safety noteOffs below), then tracked noteOffs, then a
+      // blanket 128-noteOff sweep on the OLD output + selected channel (all
+      // relayed notes are remapped onto `store.channel`), then the 64-CC panic.
+      clearSendable(oldOut);
+      const now = performance.now();
       sendOutputTrackedNoteOffs(
         oldOut,
         activeNoteTracker.getNotesForOutput(oldId),
-        performance.now(),
+        now,
       );
+      sendChannelNoteOffSweep(oldOut, store.channel, now);
       try {
         sendLocalPanic(oldOut);
       } catch {
@@ -515,6 +581,10 @@ export function selectListenerOutput(
       }
     }
     activeNoteTracker.clearOutput(oldId);
+    // A new output means a fresh musical session: reset the deferred anchor so
+    // the first event on the new output re-anchors. The NEW output gets no
+    // safety bytes (nothing was ever sent to it yet).
+    listenerScheduler.resetAnchor();
   }
   store.setSelectedOutput(newId);
 }
@@ -539,16 +609,26 @@ export function changeListenerChannel(
   if (outId !== null) {
     const output = resolveOutput(outId);
     if (output !== null) {
+      // Hotfix fidélité musicale — Option B order: cancel pending deferred sends
+      // FIRST, then tracked noteOffs on the OLD channel, then a blanket 128-
+      // noteOff sweep on the OLD channel (covers deferred noteOffs `clear()`
+      // cancelled that the tracker already forgot), then CC 120/123 on the OLD
+      // channel. The NEW channel gets no safety bytes.
+      clearSendable(output);
+      const now = performance.now();
       sendTrackedNoteOffs(
         output,
         activeNoteTracker.getNotesForChannel(outId, oldChannel),
         oldChannel,
-        performance.now(),
+        now,
       );
-      sendChannelAllNotesOff(output, oldChannel, performance.now());
+      sendChannelNoteOffSweep(output, oldChannel, now);
+      sendChannelAllNotesOff(output, oldChannel, now);
     }
     activeNoteTracker.clearChannel(outId, oldChannel);
   }
+  // A channel change starts a fresh musical session: reset the deferred anchor.
+  listenerScheduler.resetAnchor();
   store.setChannel(newChannel);
 }
 
@@ -570,6 +650,12 @@ export function panicListener(
     activeNoteTracker.clearAll();
     return;
   }
+  // Hotfix fidélité musicale — Option B order: cancel pending deferred sends
+  // FIRST, then tracked noteOffs, then a blanket 128-noteOff sweep on the
+  // selected channel, then the 64-CC panic. The 128 sweep (one channel) keeps
+  // the normal Panic DISTINCT from the 2048-message Force Panic (all 16
+  // channels). Immediate: `now` (Panic is NOT deferred).
+  clearSendable(output);
   if (outputId !== null) {
     sendOutputTrackedNoteOffs(
       output,
@@ -577,12 +663,17 @@ export function panicListener(
       now,
     );
   }
+  // The selected channel (all relayed notes are remapped onto it).
+  const chan = useListenerStore.getState().channel;
+  sendChannelNoteOffSweep(output, chan, now);
   try {
     sendLocalPanic(output, now);
   } catch {
     // Best-effort: the output may already be dying.
   }
   activeNoteTracker.clearAll();
+  // Panic starts a fresh musical session: reset the deferred anchor.
+  listenerScheduler.resetAnchor();
 }
 
 /**
@@ -600,12 +691,19 @@ export function forcePanicListener(
     activeNoteTracker.clearAll();
     return;
   }
+  // Hotfix fidélité musicale — cancel pending deferred sends FIRST (a deferred
+  // noteOn must not fire AFTER the exhaustive sweep). The 2048-message Force
+  // Panic already sweeps all 128 notes × 16 channels, so NO extra 128-sweep is
+  // needed (it is exhaustive). Immediate: `now` (Force Panic is NOT deferred).
+  clearSendable(output);
   try {
     sendForcePanic(output, now);
   } catch {
     // Best-effort: the output may already be dying.
   }
   activeNoteTracker.clearAll();
+  // Force Panic starts a fresh musical session: reset the deferred anchor.
+  listenerScheduler.resetAnchor();
 }
 
 // --- React hook (mount refcount + getOutput wiring) ------------------------
