@@ -196,6 +196,44 @@ async function joinReal(portId = "o1"): Promise<FakeSocket> {
   return socket;
 }
 
+/** Render + grant + select a real output + click « Rejoindre » + fire connect.
+ *  Does NOT ack the `room:join` — leaves it IN-FLIGHT (joined stays false).
+ *  Renders the navigable Routes app (so « ← Retour » actually unmounts the
+ *  panel + renders `home`). Returns the socket; the caller finds the pending
+ *  `room:join` emit (its ack callback is kept for late-ack tests) via
+ *  `socket.emitCalls`. */
+async function joinInFlight(portId = "o1"): Promise<FakeSocket> {
+  midiMock.nextOutputs = [makePort(portId, "Volca FM")];
+  render(
+    <MemoryRouter initialEntries={["/listener"]}>
+      <MidiAccessProvider>
+        <Routes>
+          <Route path="/listener" element={<ListenerPanel />} />
+          <Route path="/" element={<div data-testid="home">home</div>} />
+        </Routes>
+      </MidiAccessProvider>
+    </MemoryRouter>,
+  );
+  await grant();
+  act(() => {
+    useListenerStore.getState().setSelectedOutput(portId);
+  });
+  await waitFor(() =>
+    expect(screen.getByTestId("listener-join-button")).not.toBeDisabled(),
+  );
+  act(() => {
+    fireEvent.click(screen.getByTestId("listener-join-button"));
+  });
+  const socket = lastConnect.socket!;
+  act(() => {
+    socket.fireServer("connect");
+  });
+  // room:join emitted, NOT acked → in-flight (joined still false).
+  expect(socket.emitCalls.some((c) => c.ev === "room:join")).toBe(true);
+  expect(useListenerStore.getState().joined).toBe(false);
+  return socket;
+}
+
 /** Records pathname CHANGES (after the initial mount) to a shared log. */
 function LocationProbe({ log }: { log: string[] }) {
   const { pathname } = useLocation();
@@ -342,5 +380,69 @@ describe("listener BackToHome — clean leave via ListenerPanel (Q-UX10, AD-2)",
     expect(log).toEqual(["navigate:/"]);
     expect(useListenerStore.getState().joined).toBe(false);
     expect(useListenerStore.getState().fluxStatus).not.toBe("server-down");
+  });
+});
+
+// --- G3 — navigation during in-flight join (characterization, NOT fixed) -----
+// During the `room:join` emit → ack window, `joined` is still false, so
+// `leaveListenerForNavigation()` does NOT emit `room:leave` (its guard is
+// `if (store.joined)`). The socket is torn down and the server cleans via
+// disconnect/RoomService.onLeave. These tests pin the CURRENT behaviour so a
+// future fix (emit room:leave on in-flight nav, or guard the late ack) is an
+// intentional change. They add NO guard, NO timeout, do NOT wire `joining`,
+// and do NOT touch the coalescer / ARP / panic-failsafe.
+
+describe("listener navigation during in-flight join (G3, characterization)", () => {
+  it("navigation during in-flight join disconnects WITHOUT room:leave (characterization, not fixed)", async () => {
+    const socket = await joinInFlight();
+    const joinCall = socket.emitCalls.find((c) => c.ev === "room:join")!;
+    expect(joinCall.ack).toBeTypeOf("function");
+    expect(useListenerStore.getState().joined).toBe(false); // still in-flight
+
+    // Navigate via « ← Retour » → leaveListenerForNavigation(). Because joined
+    // is still false, NO `room:leave` is emitted (the guard is `if (store.joined)`).
+    const emitsBefore = socket.emitCalls.length;
+    fireEvent.click(screen.getByTestId("listener-back-to-home"));
+
+    const leaveEmitted = socket.emitCalls
+      .slice(emitsBefore)
+      .some((c) => c.ev === "room:leave");
+    expect(leaveEmitted).toBe(false); // G3: no room:leave on in-flight nav
+    // Socket torn down (no ghost membership; server cleans via disconnect).
+    expect(socket.disconnectCount).toBe(1);
+    // Local state clean (voluntary leave → NOT server-down).
+    expect(useListenerStore.getState().joined).toBe(false);
+    expect(useListenerStore.getState().joining).toBe(false); // not wired
+    expect(useListenerStore.getState().fluxStatus).not.toBe("server-down");
+    expect(useListenerStore.getState().fluxStatus).toBe("idle");
+    // Navigation reached `/`.
+    expect(screen.getByTestId("home")).toBeInTheDocument();
+  });
+
+  it("late ack after navigation resurrects joined=true (G3B debt — characterization, NOT fixed)", async () => {
+    const socket = await joinInFlight();
+    const joinCall = socket.emitCalls.find((c) => c.ev === "room:join")!;
+
+    // Navigate away during the in-flight join.
+    fireEvent.click(screen.getByTestId("listener-back-to-home"));
+    expect(useListenerStore.getState().joined).toBe(false);
+    expect(socket.disconnectCount).toBe(1);
+    expect(screen.getByTestId("home")).toBeInTheDocument();
+
+    // G3B RISK (debt, NOT patched here): the `room:join` ack callback is an
+    // UNGUARDED closure. If it fires AFTER the navigation (here called manually
+    // via the harness — the ack is just a stored JS fn), it sets joined=true +
+    // fluxStatus="waiting" even though the socket is already disconnected and
+    // `socketRef` is null → a ZOMBIE state (store says joined, no socket, no
+    // room membership). Real-world reachability depends on whether Socket.IO
+    // drops in-flight acks on client `disconnect()` (to verify separately —
+    // the fake socket does NOT model that). Pinning the closure's behaviour,
+    // NOT claiming it is reachable in production.
+    act(() => {
+      joinCall.ack!({ ok: true });
+    });
+    expect(useListenerStore.getState().joined).toBe(true); // resurrected
+    expect(useListenerStore.getState().fluxStatus).toBe("waiting");
+    expect(useListenerStore.getState().joining).toBe(false); // still not wired
   });
 });
