@@ -80,9 +80,12 @@ import type { CcMode } from "../lib/cc-coalescer";
 //                    « Sortie MIDI déconnectée. Rebranchez le périphérique ou
 //                    choisissez une autre sortie. » + the fail-safe (scheduler
 //                    stopped). LOCAL: raised by the reception wiring / output
-//                    watcher, no network event. Cleared when the listener picks
-//                    a new output (`setSelectedOutput` with a non-null id) — so
-//                    choosing another sortie dismisses E5 and reopens the picker.
+//                    watcher, no network event. Cleared TWO ways: (1) the
+//                    listener picks a new output (`setSelectedOutput` with a
+//                    non-null id — choosing another sortie dismisses E5 and
+//                    reopens the picker; clearing to null does NOT clear it, so
+//                    the alert survives a loss-driven clear until a real new
+//                    choice); (2) `resetFlux()` on leave / navigation.
 //
 // Scope: output selection + channel + join state + flux reception state +
 // backpressure telemetry + output-lost fail-safe. No emergency all-notes-off
@@ -118,7 +121,10 @@ export interface ListenerState {
   /**
    * Story 4.5 — E13: a received `midi:event` had a `v` incompatible with
    * `PROTOCOL_VERSION`. Drives the « Version de protocole incompatible… » Alert.
-   * Sticky (a stale build cannot recover without a page refresh).
+   * Within a joined session the flag is NOT auto-cleared by a later compatible
+   * event (the Alert stays visible until the listener leaves). It IS cleared by
+   * `resetFlux()` (leave / navigation) and by a full `reset()` — so a leave→rejoin
+   * dismisses E13 even on a stale build (pinned by the reset-contract tests).
    */
   readonly protocolError: boolean;
   /** Hotfix fidélité musicale — last restitution retard `max(0, now - targetLocalMs)` (ms; 0 on time), or `null` initially. */
@@ -132,7 +138,9 @@ export interface ListenerState {
   /**
    * Story 5.5 — E5: the selected MIDI output was lost in session (port
    * unplugged / closed / `send()` threw). Drives `OutputLostAlert` + the
-   * fail-safe (scheduler stopped). Cleared on a new non-null output selection.
+   * fail-safe (scheduler stopped). Cleared by a new non-null output selection
+   * (`setSelectedOutput(id)`; null does NOT clear it) and by `resetFlux()`
+   * (leave / navigation).
    */
   readonly outputLost: boolean;
   /**
