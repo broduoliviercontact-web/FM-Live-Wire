@@ -36,6 +36,11 @@ export const boundaryElements = [
   // other two (AD-2). It polls `/health` over HTTP (NO Socket.IO — Q-UX5) and
   // imports only shared UI primitives + `lib/utils` (no entities, no config).
   { type: "landing", pattern: "apps/web/src/features/landing/**" },
+  // Spike Dexed/WAM — isolated experimental feature (`/lab/dexed`). Like the
+  // other features it is self-contained and must NOT import performer/listener.
+  // It imports only shared UI primitives + `lib/utils` (no entities, no config),
+  // mirroring `landing`. See docs/spikes/dexed-wam.md.
+  { type: "dexed", pattern: "apps/web/src/features/dexed/**" },
   { type: "entities", pattern: "apps/web/src/entities/**" },
   { type: "web-shared", pattern: "apps/web/src/shared/**" },
   { type: "lib", pattern: "apps/web/src/lib/**" },
@@ -67,7 +72,7 @@ export const boundaryElements = [
 // import downward (entities -> shared -> lib) but never each other.
 export const boundaryAllowRules = [
   // Frontend chain: app -> features(performer|listener) -> entities -> shared -> lib
-  { from: "app", allow: ["performer", "listener", "landing", "entities", "web-shared", "lib", "config"] },
+  { from: "app", allow: ["performer", "listener", "landing", "dexed", "entities", "web-shared", "lib", "config"] },
   { from: "performer", allow: ["entities", "web-shared", "lib"] },
   // Story 4.3 — `listener` may also import `config` (UI runtime constants:
   // `LOOKAHEAD_MS` for the scheduler). `config` is a pure-constants leaf (no
@@ -81,6 +86,9 @@ export const boundaryAllowRules = [
   // the surface stays minimal and the AD-2 isolation between the three features
   // is preserved.
   { from: "landing", allow: ["web-shared", "lib"] },
+  // Spike Dexed/WAM — same minimal surface as `landing` (shared UI + lib only;
+  // no entities, no config, no cross-feature). Keeps the feature isolated.
+  { from: "dexed", allow: ["web-shared", "lib"] },
   { from: "entities", allow: ["web-shared", "lib"] },
   { from: "web-shared", allow: ["lib"] },
   { from: "lib", allow: [] },
