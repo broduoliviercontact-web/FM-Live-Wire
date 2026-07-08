@@ -152,6 +152,40 @@ describe("JoinButton — join / leave with an output selected", () => {
     expect(screen.queryByTestId("listener-join-hint")).not.toBeInTheDocument();
   });
 
+  it("the join flow never touches `joining` (characterization — field is dead in prod)", () => {
+    // Audit (Phase F): `joining` is a dead field — nothing in the join path
+    // sets it true, nothing reads it. Pin this so a future wiring of `joining`
+    // (an in-flight guard / "joining…" UI) is an intentional, visible change —
+    // not a silent side-effect. The current path drives `joined` + `fluxStatus`
+    // only. (Does NOT pin double-click / no-ack / navigation-in-flight — out of
+    // scope for this minimal characterization.)
+    renderButton();
+    expect(useListenerStore.getState().joining).toBe(false); // baseline after reset
+
+    const btn = screen.getByTestId("listener-join-button");
+    act(() => {
+      fireEvent.click(btn);
+    });
+    const socket = lastConnect.socket!;
+    act(() => {
+      socket.fireServer("connect");
+    });
+    const joinCall = socket.emitCalls.find((c) => c.ev === "room:join")!;
+
+    // Before the ack: `room:join` is emitted, but `joining` stays false (the
+    // in-flight window is NOT flagged — `joined` is still false too).
+    expect(useListenerStore.getState().joining).toBe(false);
+    expect(useListenerStore.getState().joined).toBe(false);
+
+    act(() => {
+      joinCall.ack!({ ok: true });
+    });
+
+    // After the ack: `joined` flips to true, `joining` STILL false (never set).
+    expect(useListenerStore.getState().joined).toBe(true);
+    expect(useListenerStore.getState().joining).toBe(false);
+  });
+
   it("clicking « Quitter le flux » emits room:leave, flips joined false, disconnects", () => {
     renderButton();
     const btn = screen.getByTestId("listener-join-button") as HTMLButtonElement;
