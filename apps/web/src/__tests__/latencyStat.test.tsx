@@ -50,7 +50,7 @@ describe("LatencyStat — alerte-only visibility (UX-DR12)", () => {
       useListenerStore.getState().incFallback();
       useListenerStore.getState().incDropped();
     });
-    expect(screen.getByTestId("listener-latency-stat-ms")).toHaveTextContent("Latence : 87 ms");
+    expect(screen.getByTestId("listener-latency-stat-ms")).toHaveTextContent("Latence estimée : 87 ms");
     expect(screen.getByTestId("listener-latency-stat-fallbacks")).toHaveTextContent("Fallbacks : 2");
     expect(screen.getByTestId("listener-latency-stat-dropped")).toHaveTextContent("Drops : 1");
   });

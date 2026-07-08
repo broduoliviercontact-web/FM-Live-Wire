@@ -329,7 +329,7 @@ describe("Story 6.3 — reduced-motion disables pulses, late warning visible (AC
     useListenerStore.setState({ lateWarning: true, lastLatencyMs: 88 });
     render(<LateAlert />);
     expect(screen.getByTestId("listener-late-alert")).toHaveTextContent(
-      "⚠ Flux en retard / connexion instable — latence 88 ms",
+      "⚠ Flux en retard / connexion instable — latence estimée 88 ms",
     );
   });
 });

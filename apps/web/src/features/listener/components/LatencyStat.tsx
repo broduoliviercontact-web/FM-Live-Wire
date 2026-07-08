@@ -4,8 +4,9 @@ import { useListenerStore } from "../store/listenerStore";
 //
 // A small stat line shown ONLY when the LOCAL late/overload warning is active
 // (`lateWarning === true`), i.e. alongside `LateAlert`. It surfaces the last
-// downstream latency (`receivedAtMs - srvTs`, both epoch `Date.now()` —
-// comparable, Story 6.8 hotfix; telemetry only — AD-11) and the fallback counter
+// downstream latency (`max(0, receivedAtMs - srvTs)`, both epoch `Date.now()` —
+// comparable, Story 6.8 hotfix; clamped to 0 so server/client clock skew never
+// shows a negative value; telemetry only — AD-11) and the fallback counter
 // (how many late noteOn/noteOff/programChange were sent via the immediate
 // fallback path, FR-26). NOT a permanent monitoring dashboard (UX-DR12): on
 // calm reception `lateWarning` is `false` → this returns `null`.
@@ -19,13 +20,16 @@ export function LatencyStat() {
   const fallbackCount = useListenerStore((s) => s.fallbackCount);
   const droppedCount = useListenerStore((s) => s.droppedCount);
   if (!lateWarning) return null;
+  // `lastLatencyMs` is already clamped ≥ 0 (effectiveLatencyMs) — never negative.
   const ms = lastLatencyMs ?? 0;
   return (
     <div
       data-testid="listener-latency-stat"
       className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground"
     >
-      <span data-testid="listener-latency-stat-ms">Latence : {ms} ms</span>
+      <span data-testid="listener-latency-stat-ms">
+        Latence estimée : {ms} ms
+      </span>
       <span data-testid="listener-latency-stat-fallbacks">
         Fallbacks : {fallbackCount}
       </span>

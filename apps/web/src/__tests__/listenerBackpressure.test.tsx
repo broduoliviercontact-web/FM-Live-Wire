@@ -425,6 +425,36 @@ describe("Backpressure integration — midi:event → scheduler → Mock + store
     expect(useListenerStore.getState().lastLatencyMs).toBe(50); // sane, NOT 1.78e12
     expect(screen.queryByTestId("listener-late-alert")).not.toBeInTheDocument();
   });
+
+  it("Story 6.8 negative-latency hotfix — clock skew (receivedAtMs - srvTs = -162) → NOT late, no fallback/drop, no LateAlert", async () => {
+    renderPanel();
+    const socket = await joinMock();
+    // Reproduce the post-Render-retest symptom: the listener clock runs behind
+    // the server, so receivedAtMs(Date.now()=2000) - srvTs(2162) = -162. A
+    // negative one-way estimate is meaningless (it does NOT mean the event
+    // arrived "before" relay) and must NOT read as a delay. The scheduler clamps
+    // to effectiveLatencyMs = 0 → not late → sent on lookahead → no alert.
+    act(() => {
+      socket.fireServer("midi:event", {
+        type: "noteOn",
+        channel: 0,
+        note: 60,
+        velocity: 100,
+        seq: 77,
+        ts: 5, // wild performer ts — ignored
+        v: PROTOCOL_VERSION,
+        roomId: ROOM,
+        srvTs: 2162, // epoch; 2000 - 2162 = -162 (clock skew) → effective 0
+      });
+    });
+    expect(getMockMidiOutput().messages).toHaveLength(1); // kept (sent, not dropped)
+    expect(getMockMidiOutput().messages[0]!.timestamp).toBe(5040); // lookahead, NOT immediate
+    expect(useListenerStore.getState().fallbackCount).toBe(0);
+    expect(useListenerStore.getState().droppedCount).toBe(0);
+    expect(useListenerStore.getState().lateWarning).toBe(false); // no alert from latency
+    expect(useListenerStore.getState().lastLatencyMs).toBe(0); // clamped, NOT -162
+    expect(screen.queryByTestId("listener-late-alert")).not.toBeInTheDocument();
+  });
 });
 
 describe("Backpressure — NO server overload event, NO extra socket.emit (FR-27 / AC-U11)", () => {

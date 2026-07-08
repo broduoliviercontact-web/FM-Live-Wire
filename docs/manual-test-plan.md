@@ -357,14 +357,17 @@ Sous-étapes (addendum A.7 étape 10) — **si réalisable sans modifier l'app**
 
 Sous-étapes (addendum A.7 étapes 6 + 11) :
 1. **Relay live** : performer joue → listener entend sur Dexed ; mesurer la latence perçue (méthode : enregistrement audio/click comparé, ou perception jouée).
-2. **Backpressure** : simuler un burst de CC (ou noteOn rapide) → observer l'UI listener (LateAlert Story 5.4 : `⚠ Flux en retard / connexion instable — latence {ms} ms`) **en cas de retard** ; sinon aucun LateAlert persistant.
+2. **Backpressure** : simuler un burst de CC (ou noteOn rapide) → observer l'UI listener (LateAlert Story 5.4 : `⚠ Flux en retard / connexion instable — latence estimée {ms} ms`) **en cas de retard** ; sinon aucun LateAlert persistant.
 3. Relever les compteurs internes si visibles (telemetry) : `fallbackCount`, `droppedCount`, `lastLatencyMs` (Story 5.4 / 5.5).
+
+> **Note latence négative / décalage d'horloge (hotfix post-retest Render)** : la valeur affichée (`Latence estimée`) est la latence **effective** `max(0, receivedAtMs - srvTs)`, soit l'estimation downstream relay→listener (les deux horloges sont epoch `Date.now()`, comparables). Cette estimation **est affectée par le décalage d'horloge serveur/client** (NTP) : si l'horloge du listener retarde de quelques centaines de ms par rapport au serveur Render, le brut `receivedAtMs - srvTs` devient **négatif** (ex. `-162 ms`) — cela ne signifie PAS que l'event est arrivé « avant » son relay, c'est un artefact de skew. La latence négative est donc **clampée à 0** (`effectiveLatencyMs`), affichée `0 ms` / `~0 ms`, et ne déclenche **jamais** `isLate` ni LateAlert. LateAlert ne s'affiche que si `effectiveLatencyMs > MAX_LATE_MS (200)` ou en cas de vrais fallbacks/drops récents (overflow du buffer borné, FR-25). Le libellé « estimée » rappelle ce caractère estimé.
 
 **Attendu** :
 - Latence perçue < ~80 ms LAN (ou < ~150 ms internet selon l'environnement de Zub).
 - < ~5 % de fallbacks immédiats en conditions stables.
 - En cas de retard dépassant `MAX_LATE_MS` (200) : LateAlert apparaît (LOCAL pur, Story 5.4) ; pas de blocage.
 - En conditions calmes : **pas de LateAlert persistant** (vigilance 5.4 : buffer MVP sans drain progressif — surveiller si alerte trop tôt après 256 events en réception calme prolongée).
+- **Latence négative (skew horloge)** : jamais affichée comme un retard — clampée à `0 ms`, pas de LateAlert lié à la latence.
 
 **Preuves attendues** :
 - Capture/measure latence : `docs/captures/28-latency-measure.png` (ou `.log`) — Emplacement : `PENDING_ZUB_SIGNOFF`

@@ -3,7 +3,7 @@
 //
 // Proves:
 //   - the alert renders the EXACT text "⚠ Flux en retard / connexion instable
-//     — latence {ms} ms" with the latency value when `lateWarning` is true;
+//     — latence estimée {ms} ms" with the latency value when `lateWarning` is true;
 //   - it is NOT shown on calm reception (lateWarning false → null);
 //   - it is LOCAL PUR: no socket, no emit, no server overload event (import-check
 //     on the source — it imports only the listener store).
@@ -43,9 +43,10 @@ describe("LateAlert — visibility + exact text", () => {
     expect(alert).toHaveTextContent(
       `${LATE_ALERT_PREFIX} 312 ms`,
     );
-    // Exact full text (em dash included).
+    // Exact full text (em dash included). "estimée" because the shown value is
+    // the effective (clamped) latency, subject to server/client clock skew.
     expect(alert).toHaveTextContent(
-      "⚠ Flux en retard / connexion instable — latence 312 ms",
+      "⚠ Flux en retard / connexion instable — latence estimée 312 ms",
     );
     expect(alert).toHaveAttribute("role", "alert");
   });
@@ -59,7 +60,7 @@ describe("LateAlert — visibility + exact text", () => {
     });
     const alert = screen.getByTestId("listener-late-alert");
     expect(alert).toHaveTextContent(
-      "⚠ Flux en retard / connexion instable — latence 0 ms",
+      "⚠ Flux en retard / connexion instable — latence estimée 0 ms",
     );
   });
 

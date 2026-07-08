@@ -23,6 +23,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   computeLatencyMs,
+  effectiveLatencyMs,
   isLate,
   shouldFallbackOnLate,
   decideBackpressure,
@@ -85,6 +86,102 @@ describe("isLate — strictly greater than MAX_LATE_MS", () => {
   it("0 / negative latency is NOT late", () => {
     expect(isLate(0)).toBe(false);
     expect(isLate(-5)).toBe(false);
+  });
+});
+
+describe("effectiveLatencyMs — clamp raw latency to 0 (clock-skew guard)", () => {
+  it("returns null when srvTs is undefined (no latency info)", () => {
+    expect(effectiveLatencyMs(undefined, 1000)).toBeNull();
+  });
+  it("passes through a positive raw delta unchanged", () => {
+    expect(effectiveLatencyMs(1000, 1250)).toBe(250);
+  });
+  it("returns 0 for a zero raw delta", () => {
+    expect(effectiveLatencyMs(1000, 1000)).toBe(0);
+  });
+  it("clamps a NEGATIVE raw delta (server clock ahead of client) to 0", () => {
+    // receivedAtMs - srvTs = -162 (the prod clock-skew symptom) → 0, NOT -162.
+    expect(effectiveLatencyMs(1162, 1000)).toBe(0);
+    expect(effectiveLatencyMs(1100, 1000)).toBe(0);
+  });
+  it("isLate(effectiveLatencyMs(...)) is false for clock skew (never late on skew)", () => {
+    expect(isLate(effectiveLatencyMs(1162, 1000))).toBe(false); // raw -162 → 0
+  });
+  it("isLate(effectiveLatencyMs(...)) is true only past MAX_LATE_MS", () => {
+    expect(isLate(effectiveLatencyMs(1000, 1250))).toBe(true); // 250 > 200
+  });
+});
+
+describe("schedule — negative latency (clock skew) never triggers late / LateAlert", () => {
+  // Reproduces the post-Render-retest symptom: the listener clock runs behind
+  // the server so receivedAtMs - srvTs is negative. A negative one-way estimate
+  // is meaningless and must NOT read as a delay (no late, no fallback/drop tied
+  // to latency, no alert). The scheduler clamps via effectiveLatencyMs.
+  const mkInfo = (srvTs: number, receivedAtMs: number) => ({
+    type: "noteOn" as const,
+    srvTs,
+    receivedAtMs,
+  });
+
+  it("receivedAtMs - srvTs = -162 → NOT late, sent on lookahead, latencyMs 0, no overflow", () => {
+    const out = recordingOutput();
+    const sched = createMidiScheduler();
+    const r = sched.schedule(
+      out,
+      new Uint8Array([0x90, 60, 100]),
+      mkInfo(1162, 1000), // raw -162 → effective 0
+      5000,
+    );
+    expect(r.late).toBe(false);
+    expect(r.outcome).toBe("sent"); // lookahead, NOT fallback
+    expect(r.bufferOverflow).toBe(false);
+    expect(r.latencyMs).toBe(0); // clamped, NOT -162
+    expect(out.sends).toHaveLength(1);
+    expect(out.sends[0]!.ts).toBe(5000 + LOOKAHEAD_MS); // 5040
+  });
+
+  it("receivedAtMs - srvTs = 50 → NOT late, sent on lookahead, latencyMs 50", () => {
+    const out = recordingOutput();
+    const sched = createMidiScheduler();
+    const r = sched.schedule(
+      out,
+      new Uint8Array([0x90, 60, 100]),
+      mkInfo(1000, 1050), // 50 ms
+      5000,
+    );
+    expect(r.late).toBe(false);
+    expect(r.outcome).toBe("sent");
+    expect(r.latencyMs).toBe(50);
+    expect(out.sends[0]!.ts).toBe(5040);
+  });
+
+  it("receivedAtMs - srvTs = 250 → IS late (> MAX_LATE_MS 200) → fallback immediate, latencyMs 250", () => {
+    const out = recordingOutput();
+    const sched = createMidiScheduler();
+    const r = sched.schedule(
+      out,
+      new Uint8Array([0x90, 60, 100]),
+      mkInfo(1000, 1250), // 250 > 200 → late
+      5000,
+    );
+    expect(r.late).toBe(true);
+    expect(r.outcome).toBe("fallback"); // noteOn → kept via immediate send
+    expect(r.latencyMs).toBe(250);
+    expect(out.sends[0]!.ts).toBe(5000); // immediate, NOT 5040
+  });
+
+  it("a late controlChange at 250 IS dropped (droppable type), confirming late still fires past MAX_LATE_MS", () => {
+    const out = recordingOutput();
+    const sched = createMidiScheduler();
+    const r = sched.schedule(
+      out,
+      new Uint8Array([0xb0, 74, 91]),
+      { type: "controlChange", srvTs: 1000, receivedAtMs: 1250 },
+      5000,
+    );
+    expect(r.late).toBe(true);
+    expect(r.outcome).toBe("dropped"); // CC → drop
+    expect(out.sends).toHaveLength(0);
   });
 });
 

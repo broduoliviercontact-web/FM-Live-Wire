@@ -199,9 +199,9 @@ describe("Story 6.2 — Alert variants: 3px left border + semantic color", () =>
     const el = screen.getByTestId("listener-late-alert");
     expect(el.className).toContain("border-l-[3px]");
     expect(el.className).toContain("border-l-late");
-    // Exact microcopy preserved.
+    // Exact microcopy preserved ("estimée" — effective/clamped latency).
     expect(el).toHaveTextContent(
-      "⚠ Flux en retard / connexion instable — latence 312 ms",
+      "⚠ Flux en retard / connexion instable — latence estimée 312 ms",
     );
   });
 });

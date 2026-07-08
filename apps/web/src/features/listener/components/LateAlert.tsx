@@ -16,16 +16,23 @@ import { useListenerStore } from "../store/listenerStore";
 // Alerte-only (UX-DR12/14): `lateWarning` is `false` on calm reception, so this
 // returns `null` and nothing is shown by default. The `LatencyStat` companion
 // is shown only alongside this alert.
+//
+// Story 6.8 (negative-latency hotfix): the shown `ms` is the EFFECTIVE latency
+// `max(0, receivedAtMs - srvTs)` from the scheduler — never negative. A negative
+// raw delta (server/client clock skew) is clamped to 0 upstream, so this alert
+// can never read "−N ms". The alert still only shows when `lateWarning` is true:
+// `effectiveLatencyMs > MAX_LATE_MS` OR a real buffer-overflow drop (FR-25).
 
 /** Exact alert text prefix (E10). The `{ms}` value follows, then ` ms`. */
 export const LATE_ALERT_PREFIX =
-  "⚠ Flux en retard / connexion instable — latence";
+  "⚠ Flux en retard / connexion instable — latence estimée";
 
 export function LateAlert() {
   const lateWarning = useListenerStore((s) => s.lateWarning);
   const lastLatencyMs = useListenerStore((s) => s.lastLatencyMs);
   if (!lateWarning) return null;
   // No `srvTs` on the triggering event → show 0 (the buffer-overflow case).
+  // `lastLatencyMs` is already clamped ≥ 0 (effectiveLatencyMs) — never negative.
   const ms = lastLatencyMs ?? 0;
   return (
     <div

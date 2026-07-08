@@ -90,9 +90,14 @@ export type ScheduleOutcome = "sent" | "fallback" | "dropped";
 export interface ScheduleResult {
   /** The new event's fate: sent (lookahead), fallback (immediate), or dropped. */
   readonly outcome: ScheduleOutcome;
-  /** `true` when `receivedAtMs - srvTs > MAX_LATE_MS` (strict). `false` when `srvTs` absent. */
+  /** `true` when `effectiveLatencyMs > MAX_LATE_MS` (strict). `false` when `srvTs` absent. */
   readonly late: boolean;
-  /** `receivedAtMs - srvTs` (epoch ms, comparable), or `null` when `srvTs` is absent. */
+  /**
+   * Effective (non-negative) downstream latency `max(0, receivedAtMs - srvTs)`
+   * (epoch ms, comparable), or `null` when `srvTs` is absent. Clamped to 0 so
+   * clock skew (server ahead of client → negative raw delta) never reads as a
+   * delay and never drives the late decision. The UI shows this value.
+   */
   readonly latencyMs: number | null;
   /** The buffer was full → the OLDEST pending event was dropped (FR-25). */
   readonly bufferOverflow: boolean;
@@ -119,9 +124,12 @@ export interface ScheduleInfo {
 }
 
 /**
- * Compute the downstream relay latency `receivedAtMs - srvTs` (epoch ms − epoch
- * ms, comparable), or `null` when `srvTs` is absent. Pure: no clock, no output,
- * no side effect.
+ * Compute the RAW downstream relay latency `receivedAtMs - srvTs` (epoch ms −
+ * epoch ms, comparable), or `null` when `srvTs` is absent. Pure: no clock, no
+ * output, no side effect. MAY BE NEGATIVE under server/client clock skew (the
+ * server's `Date.now()` runs a few hundred ms ahead of the listener's) — a
+ * negative one-way estimate is meaningless, so callers that drive the late
+ * decision or the UI MUST go through {@link effectiveLatencyMs} instead.
  *
  * NOTE: this deliberately does NOT use the performer `event.ts`. The server's
  * `srvTs` is epoch `Date.now()` while the performer's `ts` is a
@@ -138,8 +146,26 @@ export function computeLatencyMs(
 }
 
 /**
- * `true` when the latency is late (strictly greater than `MAX_LATE_MS`).
- * 200 ms exact is NOT late (boundary); `null` (no `srvTs`) is NOT late. Pure.
+ * Effective (non-negative) latency used by the late decision AND the UI:
+ * `Math.max(0, computeLatencyMs(srvTs, receivedAtMs))`, or `null` when `srvTs`
+ * is absent. Clock skew between the Render server and the listener machine can
+ * make the raw `receivedAtMs - srvTs` NEGATIVE (the listener clock runs behind
+ * the server) — that does NOT mean the event arrived "before" it was relayed.
+ * Clamping to 0 guarantees: (a) `isLate` never fires on skew, (b) the stat /
+ * LateAlert never reads "−162 ms". Pure.
+ */
+export function effectiveLatencyMs(
+  srvTs: number | undefined,
+  receivedAtMs: number,
+): number | null {
+  const raw = computeLatencyMs(srvTs, receivedAtMs);
+  return raw === null ? null : Math.max(0, raw);
+}
+
+/**
+ * `true` when the effective latency is late (strictly greater than
+ * `MAX_LATE_MS`). 200 ms exact is NOT late (boundary); `null` (no `srvTs`) is
+ * NOT late; a clamped-to-0 (clock-skew) value is NOT late. Pure.
  */
 export function isLate(latencyMs: number | null): boolean {
   return latencyMs !== null && latencyMs > MAX_LATE_MS;
@@ -303,12 +329,12 @@ export function createMidiScheduler(
         return {
           outcome: "dropped",
           late: false,
-          latencyMs: computeLatencyMs(info.srvTs, info.receivedAtMs),
+          latencyMs: effectiveLatencyMs(info.srvTs, info.receivedAtMs),
           bufferOverflow: false,
           stopped: true,
         };
       }
-      const latencyMs = computeLatencyMs(info.srvTs, info.receivedAtMs);
+      const latencyMs = effectiveLatencyMs(info.srvTs, info.receivedAtMs);
       const late = isLate(latencyMs);
       const result = decideBackpressure({
         type: info.type,
