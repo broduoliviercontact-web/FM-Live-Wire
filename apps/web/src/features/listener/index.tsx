@@ -26,6 +26,10 @@ import { ForcePanicButton } from "./components/ForcePanicButton";
 import { BackToHome } from "./components/BackToHome";
 import { useOutputState } from "./hooks/useOutputState";
 import { leaveListenerForNavigation } from "./api/connection";
+import {
+  isTimingDebugEnabled,
+  downloadTimingCsv,
+} from "../../lib/timing-debug";
 
 // Listener feature root (Story 4.1 + 4.2).
 //
@@ -114,6 +118,20 @@ export function ListenerPanel() {
               an interchangeable output — the scheduler pipeline is unchanged. */}
           <MockBadge />
           <MockByteStream />
+          {/* Hotfix audit — bouton d'export de la trace timing (CSV). Rendu
+              UNIQUEMENT quand le debug timing est actif (`?debugTiming=1`) ;
+              absent en prod normale. Le CSV compare MIDI IN (performer) vs
+              target scheduler vs MIDI OUT (timestamps passés à output.send). */}
+          {isTimingDebugEnabled() && (
+            <button
+              type="button"
+              data-testid="listener-export-timing-csv"
+              onClick={downloadTimingCsv}
+              className="text-xs underline text-muted-foreground"
+            >
+              Exporter timings CSV
+            </button>
+          )}
           {/* Story 5.4 — backpressure UI: a LOCAL late/overload alert (FR-27,
               UX-DR14) + an alerte-only latency stat (UX-DR12). Both self-gate
               on `lateWarning` (null on calm reception), so mounting them

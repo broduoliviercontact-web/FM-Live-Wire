@@ -22,6 +22,7 @@ import {
 } from "../lib/active-notes";
 import { sendLocalPanic } from "../lib/panic";
 import { sendForcePanic } from "../lib/force-panic";
+import { logListenerSchedule } from "../../../lib/timing-debug";
 
 // Story 4.4 / 4.5 — shared listener Socket.IO connection (AD-10, AD-11, AD-12,
 // AD-17).
@@ -291,6 +292,7 @@ function handleMidiEvent(event: MidiEvent): void {
   // the per-type policy (FR-26). The conditional spread keeps `srvTs` absent when
   // undefined (`exactOptionalPropertyTypes`).
   const srvTs = (event as unknown as { srvTs?: number }).srvTs;
+  const receivedAt = Date.now();
   const result: ScheduleResult = listenerScheduler.schedule(output, bytes, {
     type: event.type,
     // Hotfix fidélité musicale — the performer `event.ts` (a `performance.now()`
@@ -301,8 +303,26 @@ function handleMidiEvent(event: MidiEvent): void {
     // event, so it is type-safe to read directly (unlike the optional `srvTs`
     // envelope field read via cast above).
     performerTs: event.ts,
-    receivedAtMs: Date.now(),
+    receivedAtMs: receivedAt,
     ...(srvTs !== undefined ? { srvTs } : {}),
+  });
+  // Hotfix audit — trace schedule listener (opt-in `?debugTiming=1`, no-op sinon).
+  // Logge `performerTs`, l'ancre mirror, `targetLocalMs`, `targetDelta`, `outcome`,
+  // `scheduleLateMs`, `sentTimestamp` (le timestamp réellement passé à
+  // `output.send`). Aucune donnée sensible. Le miroir d'ancre se resync seul sur
+  // divergence (reset lifecycle) — aucun wiring des sites `resetAnchor`.
+  logListenerSchedule({
+    seq: (event as unknown as { seq: number }).seq,
+    type: event.type,
+    channel: event.channel,
+    note: "note" in event ? event.note : undefined,
+    velocity: "velocity" in event ? event.velocity : undefined,
+    performerTs: event.ts,
+    receivedAt,
+    targetLocalMs: result.targetLocalMs,
+    now: result.now,
+    outcome: result.stopped === true ? "stopped" : result.outcome,
+    scheduleLateMs: result.scheduleLateMs,
   });
   // Story 5.5 — fail-safe no-op: a stopped `schedule` (scheduler stopped on
   // disconnect / server-down / output lost) sends nothing and touches no

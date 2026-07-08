@@ -3,6 +3,7 @@ import { useMidiInputs } from "../../../lib/midi-access";
 import { decodeMidiEvent } from "../lib/decode";
 import { createSeqCounter, type SeqCounter } from "../lib/seq";
 import type { MidiEvent } from "../../../entities/MidiEvent";
+import { logPerformerCapture } from "../../../lib/timing-debug";
 
 // Story 3.3 — capture hook (AD-3, AD-5, AD-8).
 //
@@ -54,6 +55,19 @@ export function useMidiInput({ onEvent }: UseMidiInputOptions): void {
       });
       if (midi !== null) {
         seq.advance();
+        // Hotfix audit — trace capture (opt-in `?debugTiming=1`, no-op sinon).
+        // Logge `event.timeStamp` (`performerTs`) et `performance.now()` au handler
+        // + deltas depuis le précédent noteOn, pour mesurer la régularité du stamp
+        // performer (hypothèse : batch IAC/Ableton). Aucune donnée sensible.
+        logPerformerCapture({
+          seq: midi.seq,
+          type: midi.type,
+          channel: midi.channel,
+          note: "note" in midi ? midi.note : undefined,
+          velocity: "velocity" in midi ? midi.velocity : undefined,
+          performerTs: ev.timeStamp,
+          now: performance.now(),
+        });
         onEventRef.current(midi);
       }
     };

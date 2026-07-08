@@ -121,6 +121,20 @@ export interface ScheduleResult {
    * the jitter). Distinct from the epoch network latency (`latencyMs`).
    */
   readonly scheduleLateMs: number;
+  /**
+   * Hotfix audit — le slot musical reconstruit (`anchor.localMs +
+   * max(0, performerTs - anchor.performerTs)`), l'instant local absolu ciblé par
+   * la restitution différée. Exposé pour le diagnostic timing (trace listener) ;
+   * pour un event `stopped` (pas de send), reflète `now` et n'est pas un vrai
+   * target. Toujours défini (aucune nouvelle branche).
+   */
+  readonly targetLocalMs: number;
+  /**
+   * Hotfix audit — l'instant local de scheduling (`now`) utilisé par cette
+   * décision. Sert au diagnostic (colonne `now` + `sentTimestamp` pour le
+   * fallback) et au miroir d'ancre du module debug. Toujours défini.
+   */
+  readonly now: number;
 }
 
 /** Info needed to schedule one event (besides the raw bytes + the output). */
@@ -220,7 +234,10 @@ export interface BackpressureInput {
  * the deferred target, which the pure decision does not know). Tests of the
  * pure `decideBackpressure` see exactly these four fields.
  */
-export type BackpressureResult = Omit<ScheduleResult, "scheduleLateMs">;
+export type BackpressureResult = Omit<
+  ScheduleResult,
+  "scheduleLateMs" | "targetLocalMs" | "now"
+>;
 
 /**
  * Pure backpressure decision: given the event (type + latency) and the current
@@ -381,6 +398,8 @@ export function createMidiScheduler(
           bufferOverflow: false,
           stopped: true,
           scheduleLateMs: 0,
+          targetLocalMs: now, // pas de send (stopped) ; reflète `now`, pas un vrai target
+          now,
         };
       }
       // Hotfix fidélité musicale — deferred playback target. The performer
@@ -424,7 +443,12 @@ export function createMidiScheduler(
         safeSend(output, data, now);
       }
       // outcome === "dropped" → no send (schedule-late CC / pitchBend).
-      return { ...result, scheduleLateMs: scheduleLateMs(targetLocalMs, now) };
+      return {
+        ...result,
+        scheduleLateMs: scheduleLateMs(targetLocalMs, now),
+        targetLocalMs,
+        now,
+      };
     },
     getBufferLength(): number {
       return bufferLength;
