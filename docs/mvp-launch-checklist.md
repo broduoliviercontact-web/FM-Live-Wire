@@ -11,7 +11,7 @@
 
 Cette checklist agrège les **preuves existantes** des Stories 6.4 → 6.8 et prépare la **répétition générale + la première session audience** (S-10). **Aucune exécution terrain n'a eu lieu à ce stade.** Plus précisément, à la date ci-dessus :
 
-- **Déploiement prod HTTPS (6.8) : PENDING_ZUB_DEPLOY_SIGNOFF** — la configuration de déploiement est prête et validée côté readiness (`docs/deploy.md` + `Caddyfile`), mais le déploiement réel sur l'hôte prod n'a **pas** été exécuté. HTTPS réel non vérifié. `window.isSecureContext` prod non confirmé. `/health` prod réel non signé.
+- **Déploiement prod HTTPS (6.8) : `DEPLOYED_AND_VERIFIED`** — déployé et vérifié en prod Render (`https://fm-live-wire.onrender.com/`) par Zub : HTTPS / `window.isSecureContext === true` OK, performer + listener connectés, MIDI relayé par Internet, websocket-only prod OK, flux utilisable après hotfix latence cross-client, `verify-no-secrets` PASS dans le build. Détails + sign-off dans `docs/deploy.md` §14. (`/health` prod signé + graceful shutdown restent à vérifier lors d'un prochain passage — non bloquants pour 6.8.)
 - **Test manuel IAC/Dexed/MIDI Monitor (6.6) : PENDING_ZUB_SIGNOFF** — le plan 11 étapes est livré (`docs/manual-test-plan.md`), mais l'exécution matérielle macOS par Zub n'a **pas** eu lieu (captures, mesures latence, sign-off §11 non produits).
 - **Répétition générale (dress rehearsal) : PENDING_ZUB_REHEARSAL_SIGNOFF** — aucune session live de bout en bout n'a été exécutée.
 - **Première session audience réelle : PENDING_ZUB_REHEARSAL_SIGNOFF** — aucune session devant petite audience réelle n'a eu lieu.
@@ -113,9 +113,9 @@ Attendu : 794/794 tests, coverage EXIT 0, lint exit 0, builds ✓, 16/16 boundar
 
 - **Pré-session automatisée (§A) re-jouée le :** `____ / ____ / ____` → ☐
 - **Test manuel 6.6 exécuté le :** `____ / ____ / ____` → ☐
-- **Déploiement prod 6.8 exécuté le :** `____ / ____ / ____` → ☐ (statut 6.8 → `DEPLOYED_AND_VERIFIED`)
-- **`/health` prod signé :** ☐
-- **Secure context prod signé :** ☐
+- **Déploiement prod 6.8 exécuté le :** `2026-07-07` (initial) — retest post-hotfix `2026-07-08` → ☑ (statut 6.8 → `DEPLOYED_AND_VERIFIED`, voir `docs/deploy.md` §14)
+- **`/health` prod signé :** ☐ (non signé ce cycle)
+- **Secure context prod signé :** ☑ (`window.isSecureContext === true` confirmé sur Render)
 - **Répétition générale exécutée le :** `____ / ____ / ____` → ☐ (compte-rendu `docs/rehearsal-report.md`)
 - **Première session audience réelle exécutée le :** `____ / ____ / ____` → ☐ (compte-rendu `docs/session-report-template.md` § First audience session)
 - **Décision finale :** ☐ `MVP_LIVE_VALIDATED` (S-10 atteint) ☐ `NO-GO` ☐ toujours `READY_FOR_ZUB_REHEARSAL_SIGNOFF`

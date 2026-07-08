@@ -1,10 +1,10 @@
 # FM Live Wire — Déploiement MVP (Story 6.8)
 
-- **Date :** 2026-07-07
+- **Date :** 2026-07-07 (déploiement initial) — retest post-hotfix 2026-07-08
 - **Story :** 6.8 — Déploiement MVP HTTPS mono-domaine + env prod + graceful shutdown verify + `/health` prod
-- **Statut :** `READY_FOR_ZUB_DEPLOY_SIGNOFF` — configuration de déploiement prête ; exécution production en attente de sign-off Zub (aucun environnement prod réel n'a été manipulé ; aucune validation HTTPS prod prétendue exécutée).
+- **Statut :** `DEPLOYED_AND_VERIFIED` — déployé et vérifié en prod Render (`https://fm-live-wire.onrender.com/`) par Zub : HTTPS / `window.isSecureContext === true` OK, performer + listener connectés, MIDI relayé par Internet, websocket-only prod OK (plus de `400` polling), flux utilisable après hotfix latence cross-client. Build Render OK (`pnpm install` / `-r build` / `verify-no-secrets` PASS, service live).
 
-> **Honnêteté de scope (consigne Story 6.8) :** ce document décrit la configuration de déploiement et les commandes à exécuter. Le déploiement réel sur un hôte prod + la terminaison TLS réelle ne sont PAS exécutés ici. Tant que Zub n'a pas exécuté la §12 et signé la §14, le statut reste `READY_FOR_ZUB_DEPLOY_SIGNOFF`. Ne pas marquer `DEPLOYED_AND_VERIFIED` sans exécution réelle.
+> **Honnêteté de scope (consigne Story 6.8) :** ce document décrit la configuration de déploiement et les commandes à exécuter. Le déploiement réel sur un hôte prod + la terminaison TLS réelle ont été exécutés par Zub sur Render et signés en §14. `DEPLOYED_AND_VERIFIED` est attesté **uniquement** pour le périmètre 6.8 (déploiement prod HTTPS mono-domaine + env prod + secure context + flux end-to-end + zéro secret post-build). Les items non retestés ce cycle (graceful shutdown, `/health` prod signé) restent ☐ en §14 — à compléter lors d'une prochaine vérification. **S-10 / rehearsal reste `PENDING_ZUB_REHEARSAL_SIGNOFF`** : ce statut ne vaut pas `S10_PASS` / `MVP_LIVE_VALIDATED` (réservés à la répétition générale complète + première session audience réelle + rapport signé Zub).
 
 ---
 
@@ -285,18 +285,18 @@ Aucune DB / Redis (invariant 8) — l'état (owner slot, listeners, relay) est e
 
 ## 14. Sign-off Zub
 
-> Bloc à compléter par Zub après exécution de la §12. Tant que vide, statut = `READY_FOR_ZUB_DEPLOY_SIGNOFF`.
+> Bloc complété par Zub après exécution de la §12 sur Render.
 
-- **Déploiement exécuté le :** `____ / ____ / ____`
-- **Domaine prod :** `________________________`
-- **Hôte / reverse proxy :** `________________________`
-- **/health prod observé :** `________________________`
-- **Secure context vérifié :** ☐
-- **Flux MIDI end-to-end vérifié (Story 6.6 si applicable) :** ☐
-- **Graceful shutdown vérifié :** ☐
-- **Zéro secret post-build vérifié :** ☐
-- **Décision :** ☐ `DEPLOYED_AND_VERIFIED` ☐ `READY_FOR_ZUB_DEPLOY_SIGNOFF` (toujours en attente)
-- **Notes :** `________________________`
+- **Déploiement exécuté le :** `2026-07-07` (initial) — retest post-hotfix `2026-07-08`
+- **Domaine prod :** `https://fm-live-wire.onrender.com/`
+- **Hôte / reverse proxy :** Render (reverse proxy HTTPS managé par Render)
+- **/health prod observé :** ☐ (non signé ce cycle — à vérifier lors d'un prochain passage)
+- **Secure context vérifié :** ☑ (`window.isSecureContext === true` confirmé par Zub)
+- **Flux MIDI end-to-end vérifié (Story 6.6 si applicable) :** ☑ (performer connecté avec `OWNER_SECRET`, listener connecté, IAC détecté, MIDI relayé par Internet, events reçus côté listener, Panic disponible)
+- **Graceful shutdown vérifié :** ☐ (non retesté ce cycle — à vérifier lors d'un prochain passage)
+- **Zéro secret post-build vérifié :** ☑ (`verify-no-secrets` PASS dans le build Render ; 0 `OWNER_SECRET`, 0 variable suspecte dans `apps/web/dist`)
+- **Décision :** ☑ `DEPLOYED_AND_VERIFIED` ☐ `READY_FOR_ZUB_DEPLOY_SIGNOFF` (toujours en attente)
+- **Notes :** Flux utilisable en prod après deux hotfixes — (1) `fix: force socket.io websocket transport in production client` (le client Socket.IO utilise `["websocket"]` en prod, plus de `400 Bad Request` sur `/socket.io/?transport=polling`) ; (2) `fix(listener): stop comparing cross-client clocks for latency/late` (latence listener = `receivedAtMs - srvTs`, paire epoch comparable — le bug `srvTs(epoch) - event.ts(performance.now())` ~1,78e12 ms est corrigé ; plus d'explosion fallback/drop). **Périmètre :** ce sign-off valide le déploiement prod 6.8 + la readiness rehearsal. **S-10 reste `PENDING_ZUB_REHEARSAL_SIGNOFF`** (pas `S10_PASS` / `MVP_LIVE_VALIDATED`).
 
 ---
 
