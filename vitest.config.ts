@@ -28,6 +28,8 @@ export default defineConfig({
         // 2. Panic (Story 5.2) + Force Panic (Story 5.3).
         "apps/web/src/features/listener/lib/panic.ts",
         "apps/web/src/features/listener/lib/force-panic.ts",
+        // 2b. Anti-stuck-notes safety — active-note tracker + best-effort noteOffs.
+        "apps/web/src/features/listener/lib/active-notes.ts",
         // 3. Scheduler: lookahead + backpressure + fail-safe (Story 4.3 / 5.4 / 5.5).
         "apps/web/src/features/listener/lib/scheduler.ts",
         // 4. ValidationService (Story 2.6, server 3rd layer).
@@ -42,7 +44,7 @@ export default defineConfig({
       // statements / branches / functions / lines. `perFile: true` applies the
       // threshold to EACH listed file individually, so a regression on any one
       // module fails the run. Global 100 % is intentionally NOT enforced (it
-      // would make CI fragile on out-of-scope UI / plumbing files); only the 6
+      // would make CI fragile on out-of-scope UI / plumbing files); only the 9
       // critical modules listed in `include` are gated.
       thresholds: {
         perFile: true,

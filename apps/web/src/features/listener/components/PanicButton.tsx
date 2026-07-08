@@ -2,7 +2,7 @@ import { Button } from "../../../shared/ui/button";
 import { StopIcon } from "../../../shared/ui/icons";
 import { useMidiOutputs } from "../hooks/useMidiOutputs";
 import { useListenerStore } from "../store/listenerStore";
-import { sendLocalPanic } from "../lib/panic";
+import { panicListener } from "../api/connection";
 
 // Story 5.2 — local Panic button (AD-7, FR-16, FR-18, S-2, AC-U13, UX-DR15).
 //
@@ -36,8 +36,10 @@ export function PanicButton() {
     if (selectedOutputId === null) return; // no output → no-op, no crash
     const output = getOutput(selectedOutputId);
     if (output === null) return; // hot-unplug → no-op, no crash
-    // Local sweep on the selected output (real or Mock). Immediate, no timing.
-    sendLocalPanic(output);
+    // Local sweep on the selected output (real or Mock) + explicit noteOffs for
+    // the tracked active notes (anti-stuck-notes), then forget them. Immediate,
+    // no timing. No Force Panic / 2048 here (Story 5.3). LOCAL: no socket event.
+    panicListener(output, selectedOutputId);
   };
 
   // Fixed to the bottom of the viewport so it is never hidden by scroll or a

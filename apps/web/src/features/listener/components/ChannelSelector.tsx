@@ -1,6 +1,7 @@
 import { useRef } from "react";
-import { useMidiInputs } from "../../../lib/midi-access";
+import { useMidiOutputs } from "../hooks/useMidiOutputs";
 import { useListenerStore } from "../store/listenerStore";
+import { changeListenerChannel } from "../api/connection";
 import {
   uiChannelToData,
   dataChannelToUi,
@@ -40,9 +41,8 @@ const RADIO_BASE =
   "relative inline-flex h-9 items-center justify-center gap-1 rounded-md border text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
 export function ChannelSelector() {
-  const { status } = useMidiInputs();
+  const { status, getOutput } = useMidiOutputs();
   const channel = useListenerStore((s) => s.channel);
-  const setChannel = useListenerStore((s) => s.setChannel);
   const groupRef = useRef<HTMLDivElement>(null);
 
   if (status !== "ready") {
@@ -60,7 +60,7 @@ export function ChannelSelector() {
   // 1–16 so the arrow keys can't escape the group.
   const moveFocusTo = (ui: number) => {
     const clamped = Math.max(UI_CHANNEL_MIN, Math.min(UI_CHANNEL_MAX, ui));
-    setChannel(uiChannelToData(clamped));
+    changeListenerChannel(uiChannelToData(clamped), getOutput);
     const btn = groupRef.current?.querySelector<HTMLButtonElement>(
       `[data-ui="${clamped}"]`,
     );
@@ -137,7 +137,7 @@ export function ChannelSelector() {
               aria-label={`Canal ${ui}`}
               data-ui={ui}
               data-testid={`listener-channel-button-${ui}`}
-              onClick={() => setChannel(uiChannelToData(ui))}
+              onClick={() => changeListenerChannel(uiChannelToData(ui), getOutput)}
               onKeyDown={(e) => handleKeyDown(e, ui)}
               className={cn(
                 RADIO_BASE,

@@ -4,7 +4,7 @@ import { Button } from "../../../shared/ui/button";
 import { WarnIcon } from "../../../shared/ui/icons";
 import { useMidiOutputs } from "../hooks/useMidiOutputs";
 import { useListenerStore } from "../store/listenerStore";
-import { sendForcePanic } from "../lib/force-panic";
+import { forcePanicListener } from "../api/connection";
 import { ForcePanicDialog, FORCE_PANIC_TOAST } from "./ForcePanicDialog";
 
 // Story 5.3 — Force Panic opt-in button (FR-17, AC-U14, UX-DR16, UX-DR23).
@@ -36,8 +36,9 @@ export function ForcePanicButton() {
     if (selectedOutputId === null) return; // no output → no send (guarded)
     const output = getOutput(selectedOutputId);
     if (output === null) return; // hot-unplug → no send, no crash
-    // Local noteOff sweep (immediate, no timing offset). Real or Mock output.
-    sendForcePanic(output);
+    // Local noteOff sweep (2048 messages, immediate) + forget tracked active
+    // notes (the sweep just released them all). Real or Mock output. LOCAL.
+    forcePanicListener(output);
     toast.success(FORCE_PANIC_TOAST);
   };
 

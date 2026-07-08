@@ -13,6 +13,14 @@ import {
 import { encodeForOutput } from "../lib/encode";
 import { createMidiScheduler, type ScheduleResult } from "../lib/scheduler";
 import type { MidiSendable } from "../lib/sendable";
+import {
+  createActiveNoteTracker,
+  sendOutputTrackedNoteOffs,
+  sendTrackedNoteOffs,
+  sendChannelAllNotesOff,
+} from "../lib/active-notes";
+import { sendLocalPanic } from "../lib/panic";
+import { sendForcePanic } from "../lib/force-panic";
 
 // Story 4.4 / 4.5 — shared listener Socket.IO connection (AD-10, AD-11, AD-12,
 // AD-17).
@@ -83,6 +91,49 @@ const listenerScheduler = createMidiScheduler({
 });
 
 /**
+ * Anti-stuck-notes safety — the active-note tracker (a module singleton, like the
+ * scheduler). Records notes ACTUALLY sent to the listener output (AFTER channel
+ * remap, keyed by `outputId + channel + note`) so the safety paths below can send
+ * EXPLICIT noteOffs for the still-sounding notes on the OLD output / OLD channel
+ * (CC 123 alone is ignored by some synths). Fed in `handleMidiEvent` (only when a
+ * send actually happened and the scheduler did not stop mid-send); cleared by the
+ * safety paths + `__resetListenerConnection` (test isolation). See `lib/active-notes`.
+ */
+const activeNoteTracker = createActiveNoteTracker();
+
+/**
+ * Best-effort: send tracked noteOffs for the CURRENTLY selected output's active
+ * notes + the local CC panic sweep, then clear the tracker. Used by the voluntary
+ * leave / navigation paths (the output is still resolvable there). Each send is
+ * individually guarded inside the helpers — a throw never propagates to the UI.
+ */
+function sendSafetyPanicOnCurrentOutput(): void {
+  const store = useListenerStore.getState();
+  const outId = store.selectedOutputId;
+  if (outId === null) {
+    activeNoteTracker.clearAll();
+    return;
+  }
+  const getOutput = getOutputRef;
+  if (getOutput !== null) {
+    const output = getOutput(outId);
+    if (output !== null) {
+      sendOutputTrackedNoteOffs(
+        output,
+        activeNoteTracker.getNotesForOutput(outId),
+        performance.now(),
+      );
+      try {
+        sendLocalPanic(output);
+      } catch {
+        // Best-effort: the output may already be dying.
+      }
+    }
+  }
+  activeNoteTracker.clearAll();
+}
+
+/**
  * Story 5.5 — LOCAL output-lost fail-safe (AD-17, FR-24, UX-DR14 E5, AC-U9).
  * Stop the scheduler (no in-flight bytes / no orphan notes), clear the selected
  * output so the `MidiPortPicker` reopens (the listener can pick another sortie
@@ -90,11 +141,34 @@ const listenerScheduler = createMidiScheduler({
  * event is emitted. Called by the `useOutputState` watcher (port unplugged /
  * `state:"disconnected"`) and by the scheduler's `onOutputLost` (a `send()`
  * throw — `InvalidStateError`). Idempotent.
+ *
+ * Anti-stuck-notes safety: BEFORE clearing, send EXPLICIT noteOffs for the still
+ * sounding notes to the OLD output (best-effort — the port may already be gone,
+ * in which case there is nothing to send). NO `sendLocalPanic` here: the port is
+ * broken (that is WHY we are here), so a 64-message CC sweep would mostly be 64
+ * caught throws; the tracked noteOffs are the minimal, targeted bytes that can
+ * still land if the port is in a transient `state:"disconnected"` (still in the
+ * map, still sendable). Each noteOff is individually guarded. Idempotent.
  */
 export function handleOutputLost(): void {
   const store = useListenerStore.getState();
+  const oldId = store.selectedOutputId;
+  if (oldId !== null) {
+    const getOutput = getOutputRef;
+    if (getOutput !== null) {
+      const oldOut = getOutput(oldId);
+      if (oldOut !== null) {
+        sendOutputTrackedNoteOffs(
+          oldOut,
+          activeNoteTracker.getNotesForOutput(oldId),
+          performance.now(),
+        );
+      }
+    }
+    activeNoteTracker.clearOutput(oldId);
+  }
   listenerScheduler.stop();
-  if (store.selectedOutputId !== null) store.setSelectedOutput(null);
+  if (oldId !== null) store.setSelectedOutput(null);
   store.setOutputLost(true);
 }
 
@@ -190,6 +264,21 @@ function handleMidiEvent(event: MidiEvent): void {
   // disconnect / server-down / output lost) sends nothing and touches no
   // telemetry / no alert. The flux status / E5 flag already reflect the cause.
   if (result.stopped === true) return;
+  // Anti-stuck-notes safety — track notes ACTUALLY sent (after remap) so the
+  // port/channel change + Panic + output-lost paths can send explicit noteOffs.
+  // Guard: `outcome` reflects the DECISION, not the send success — a mid-send
+  // throw flips `stopped` (in `safeSend`) and calls `handleOutputLost`, which
+  // clears the tracker FIRST. So we only track when a send truly happened AND the
+  // scheduler did not stop mid-send (JS single-threaded: the two cannot race).
+  // `dropped` events were never sent → not tracked. `bytes` carry the forced
+  // channel in the status byte (post-`encodeForOutput`), so the tracker reflects
+  // what the synth received.
+  if (
+    (result.outcome === "sent" || result.outcome === "fallback") &&
+    !listenerScheduler.isStopped()
+  ) {
+    activeNoteTracker.trackMidiBytes(bytes, outputId);
+  }
   // Story 5.4 — LOCAL telemetry update (FR-27: no network event emitted).
   // Buffer overflow → the oldest was dropped. Late + fallbackType → the new
   // event was sent immediately. Late + dropType → the new event was dropped.
@@ -298,6 +387,10 @@ export function leaveFlux(): void {
   const socket = socketRef;
   if (socket === null) {
     const s = useListenerStore.getState();
+    // Anti-stuck-notes safety — best-effort cut any sounding notes on the current
+    // output, then stop the scheduler (clean idle, no in-flight bytes).
+    sendSafetyPanicOnCurrentOutput();
+    listenerScheduler.stop();
     s.setJoined(false);
     s.resetFlux();
     return;
@@ -306,6 +399,11 @@ export function leaveFlux(): void {
     const s = useListenerStore.getState();
     s.setJoined(false);
     s.resetFlux();
+    // Anti-stuck-notes safety — best-effort cut the notes still sounding on the
+    // current output (tracked noteOffs + local CC panic) BEFORE stopping the
+    // scheduler. The output is still resolvable here (no loss happened). Then
+    // forget all active notes. Best-effort: a send throw never blocks the leave.
+    sendSafetyPanicOnCurrentOutput();
     // Story 5.5 — STOP the scheduler on voluntary leave (clean idle, no
     // in-flight bytes). `resetFlux` already cleared the 5.4 telemetry; the
     // pending buffer is reset to factory on the next `start()` (rejoin).
@@ -342,12 +440,19 @@ export function leaveListenerForNavigation(): void {
       // Best-effort `room:leave` (no ack wait — we disconnect right after).
       emitRoomLeave(socket, () => {});
     }
+    // Anti-stuck-notes safety — best-effort cut the notes still sounding on the
+    // current output BEFORE stopping the scheduler (the output is still
+    // resolvable here). Then forget all active notes.
+    sendSafetyPanicOnCurrentOutput();
     listenerScheduler.stop();
     intentionalClose = true; // voluntary → no server-down pill on the disconnect
     socket.disconnect();
     socketRef = null;
   } else {
     // No socket (e.g. never joined) — still stop the scheduler if it exists.
+    // Best-effort safety on the current output if one is selected (harmless
+    // all-notes-off on navigation); clears the tracker regardless.
+    sendSafetyPanicOnCurrentOutput();
     listenerScheduler.stop();
   }
   store.setJoined(false);
@@ -363,6 +468,144 @@ export function leaveListenerForNavigation(): void {
 export function emitMidiTest(): void {
   const socket = ensureListenerSocket();
   socket.emit("midi:test", {});
+}
+
+// --- Anti-stuck-notes safety orchestration -----------------------------------
+//
+// The following actions wrap the plain store mutations (`setSelectedOutput` /
+// `setChannel`) so a port change / channel change / Panic / Force Panic ALSO cuts
+// the notes that were sounding on the OLD output / OLD channel BEFORE the new
+// choice takes effect. They are LOCAL (no socket event) and best-effort (a send
+// throw never blocks the UI). The components call THESE instead of the raw store
+// setters so the safety is centralized and cannot be bypassed by a direct
+// `setSelectedOutput` / `setChannel` call (the `useOutputState` watcher + the
+// `MidiPortPicker` hot-unplug reconciliation still call `setSelectedOutput(null)`
+// directly — that path goes through `handleOutputLost`, which sends its own
+// tracked noteOffs; routing it here would double the safety).
+
+/**
+ * Switch the listener output to `newId` (or `null` to clear). If a DIFFERENT
+ * output was previously selected, send EXPLICIT noteOffs for its still-sounding
+ * notes to the OLD output (not the new one) + the local CC panic sweep on the old
+ * output, then forget the old output's notes — all best-effort (the old port may
+ * already be unplugged → `getOutputRef` returns null → nothing to send, no throw).
+ * Then apply the new selection (which also clears the E5 alert for a non-null id).
+ * The `resolveOutput` callback is the listener `useMidiOutputs().getOutput` (it
+ * resolves the Mock sentinel too); passed in so this module stays independent of
+ * the React hook tree (the `useOutputState` watcher is the loss path, not this).
+ */
+export function selectListenerOutput(
+  newId: string | null,
+  resolveOutput: (id: string) => MidiSendable | null,
+): void {
+  const store = useListenerStore.getState();
+  const oldId = store.selectedOutputId;
+  if (oldId !== null && oldId !== newId) {
+    const oldOut = resolveOutput(oldId);
+    if (oldOut !== null) {
+      sendOutputTrackedNoteOffs(
+        oldOut,
+        activeNoteTracker.getNotesForOutput(oldId),
+        performance.now(),
+      );
+      try {
+        sendLocalPanic(oldOut);
+      } catch {
+        // Best-effort: the old output may already be gone.
+      }
+    }
+    activeNoteTracker.clearOutput(oldId);
+  }
+  store.setSelectedOutput(newId);
+}
+
+/**
+ * Switch the forced output channel to `newChannel` (wire/data 0–15). If the
+ * channel actually changes AND an output is selected, send EXPLICIT noteOffs for
+ * the still-sounding notes on the OLD channel on the CURRENT output + a targeted
+ * all-notes-off (CC 120 + CC 123) on the OLD channel (2 messages, not the full
+ * 64-message 16-channel Panic), then forget the old channel's notes. Best-effort.
+ * Then apply the new channel. Future events land on the new channel with no
+ * lingering notes on the old one.
+ */
+export function changeListenerChannel(
+  newChannel: number,
+  resolveOutput: (id: string) => MidiSendable | null,
+): void {
+  const store = useListenerStore.getState();
+  const oldChannel = store.channel;
+  if (oldChannel === newChannel) return; // no change → no safety, no store write
+  const outId = store.selectedOutputId;
+  if (outId !== null) {
+    const output = resolveOutput(outId);
+    if (output !== null) {
+      sendTrackedNoteOffs(
+        output,
+        activeNoteTracker.getNotesForChannel(outId, oldChannel),
+        oldChannel,
+        performance.now(),
+      );
+      sendChannelAllNotesOff(output, oldChannel, performance.now());
+    }
+    activeNoteTracker.clearChannel(outId, oldChannel);
+  }
+  store.setChannel(newChannel);
+}
+
+/**
+ * Normal Panic (Story 5.2) + anti-stuck-notes safety. Sends the existing 64-message
+ * CC sweep (`sendLocalPanic`) AND explicit noteOffs for the tracked active notes
+ * on the current output, then forgets all active notes. Does NOT send the 2048-message
+ * Force Panic (that is `forcePanicListener` / Story 5.3). `output` is the resolved
+ * sendable (real `MIDIOutput` or Mock) from `useMidiOutputs().getOutput`; `outputId`
+ * is the store's `selectedOutputId` (the tracker key). No-op + clear if no output.
+ * Best-effort: a send throw never blocks the UI. LOCAL: no socket event.
+ */
+export function panicListener(
+  output: MidiSendable | null,
+  outputId: string | null,
+  now: number = performance.now(),
+): void {
+  if (output === null) {
+    activeNoteTracker.clearAll();
+    return;
+  }
+  if (outputId !== null) {
+    sendOutputTrackedNoteOffs(
+      output,
+      activeNoteTracker.getNotesForOutput(outputId),
+      now,
+    );
+  }
+  try {
+    sendLocalPanic(output, now);
+  } catch {
+    // Best-effort: the output may already be dying.
+  }
+  activeNoteTracker.clearAll();
+}
+
+/**
+ * Force Panic (Story 5.3) + anti-stuck-notes safety. Sends the existing 2048-message
+ * noteOff sweep (`sendForcePanic`) — which already covers every note on every channel,
+ * so no separate tracked-noteOff pass is needed — then forgets all active notes
+ * (the sweep just released them all). `output` is the resolved sendable from
+ * `useMidiOutputs().getOutput`. No-op + clear if no output. Best-effort. LOCAL.
+ */
+export function forcePanicListener(
+  output: MidiSendable | null,
+  now: number = performance.now(),
+): void {
+  if (output === null) {
+    activeNoteTracker.clearAll();
+    return;
+  }
+  try {
+    sendForcePanic(output, now);
+  } catch {
+    // Best-effort: the output may already be dying.
+  }
+  activeNoteTracker.clearAll();
 }
 
 // --- React hook (mount refcount + getOutput wiring) ------------------------
@@ -414,4 +657,5 @@ export function __resetListenerConnection(): void {
   mountCount = 0;
   intentionalClose = false;
   listenerScheduler.reset(); // Story 5.4 — clear the pending buffer between tests
+  activeNoteTracker.clearAll(); // Anti-stuck-notes — clear the tracker between tests
 }

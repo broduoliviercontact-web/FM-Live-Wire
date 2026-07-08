@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useMidiOutputs } from "../hooks/useMidiOutputs";
+import { selectListenerOutput } from "../api/connection";
 import { Alert, AlertDescription, AlertTitle } from "../../../shared/ui/alert";
 import { InfoIcon } from "../../../shared/ui/icons";
 import { Button } from "../../../shared/ui/button";
@@ -32,7 +33,7 @@ function formatLabel(output: MidiOutputInfo): string {
 }
 
 export function MidiPortPicker() {
-  const { status, outputs, selectedOutputId, selectOutput, refreshOutputs } =
+  const { status, outputs, selectedOutputId, selectOutput, getOutput, refreshOutputs } =
     useMidiOutputs();
 
   // Hot-plug reconciliation: if the selected REAL output is no longer present in
@@ -98,7 +99,10 @@ export function MidiPortPicker() {
         data-testid="listener-output-select"
         value={selectedOutputId ?? ""}
         onChange={(e) =>
-          selectOutput(e.target.value === "" ? null : e.target.value)
+          selectListenerOutput(
+            e.target.value === "" ? null : e.target.value,
+            getOutput,
+          )
         }
         className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       >

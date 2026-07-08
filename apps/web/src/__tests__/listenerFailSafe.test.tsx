@@ -381,7 +381,12 @@ describe("Story 5.5 — output lost via state:disconnected (port still listed)",
     act(() => {
       socket.fireServer("midi:event", noteOn(2, 62, 2000));
     });
-    expect(midiMock.sendSpy).toHaveBeenCalledTimes(1);
+    // Anti-stuck-notes safety: handleOutputLost sent a best-effort tracked noteOff
+    // for the sounding note 60 to the OLD output (the port stayed in the map, still
+    // sendable) — so the count is 2 (baseline noteOn + safety noteOff), NOT 1. The
+    // subsequent event adds 0 (scheduler stopped). (Hot-unplug via DELETE — Group A
+    // — stays 1: the old output is gone, nothing to send to.)
+    expect(midiMock.sendSpy).toHaveBeenCalledTimes(2);
   });
 });
 
