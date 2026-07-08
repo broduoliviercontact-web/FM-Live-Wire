@@ -152,6 +152,172 @@ describe("JoinButton — join / leave with an output selected", () => {
     expect(screen.queryByTestId("listener-join-hint")).not.toBeInTheDocument();
   });
 
+  it("the join flow never touches `joining` (characterization — field is dead in prod)", () => {
+    // Audit (Phase F): `joining` is a dead field — nothing in the join path
+    // sets it true, nothing reads it. Pin this so a future wiring of `joining`
+    // (an in-flight guard / "joining…" UI) is an intentional, visible change —
+    // not a silent side-effect. The current path drives `joined` + `fluxStatus`
+    // only. (Does NOT pin double-click / no-ack / navigation-in-flight — out of
+    // scope for this minimal characterization.)
+    renderButton();
+    expect(useListenerStore.getState().joining).toBe(false); // baseline after reset
+
+    const btn = screen.getByTestId("listener-join-button");
+    act(() => {
+      fireEvent.click(btn);
+    });
+    const socket = lastConnect.socket!;
+    act(() => {
+      socket.fireServer("connect");
+    });
+    const joinCall = socket.emitCalls.find((c) => c.ev === "room:join")!;
+
+    // Before the ack: `room:join` is emitted, but `joining` stays false (the
+    // in-flight window is NOT flagged — `joined` is still false too).
+    expect(useListenerStore.getState().joining).toBe(false);
+    expect(useListenerStore.getState().joined).toBe(false);
+
+    act(() => {
+      joinCall.ack!({ ok: true });
+    });
+
+    // After the ack: `joined` flips to true, `joining` STILL false (never set).
+    expect(useListenerStore.getState().joined).toBe(true);
+    expect(useListenerStore.getState().joining).toBe(false);
+  });
+
+  // --- G1 — no-ack join characterization (silent failure, NOT yet fixed) -------
+  // `emitRoomJoin(socket, ack)` has NO client-side timeout. If the server never
+  // calls the ack (mid-flight disconnect, middleware drop, server crash), the
+  // join flow stays SILENT: nothing flips `joined`, no error state, the button
+  // keeps offering « Rejoindre ». These tests pin that current behaviour so a
+  // future timeout / error UI is an intentional change, not a silent drift.
+  // They do NOT add a timeout, do NOT add an error message, do NOT change any
+  // user-facing behaviour.
+
+  it("room:join WITHOUT ack leaves the listener un-joined (silent failure, not yet fixed)", () => {
+    renderButton();
+    const btn = screen.getByTestId("listener-join-button");
+    act(() => {
+      fireEvent.click(btn);
+    });
+    const socket = lastConnect.socket!;
+    act(() => {
+      socket.fireServer("connect"); // handleConnect (joined still false → idle)
+    });
+    const joinCall = socket.emitCalls.find((c) => c.ev === "room:join")!;
+    // `room:join` was emitted WITH an ack callback — the server just never
+    // calls it (the no-ack scenario).
+    expect(joinCall.ack).toBeTypeOf("function");
+
+    // DELIBERATELY never call `joinCall.ack(...)`.
+
+    const s = useListenerStore.getState();
+    expect(s.joined).toBe(false);
+    expect(s.joining).toBe(false); // not wired (Phase F characterization)
+    // Button stays « Rejoindre le flux » — no false « Quitter » state.
+    expect(screen.getByTestId("listener-join-button")).toHaveTextContent(
+      "Rejoindre le flux",
+    );
+  });
+
+  it("room:join WITHOUT ack stays silent — NO server-down (characterization, not yet fixed)", () => {
+    renderButton();
+    const btn = screen.getByTestId("listener-join-button");
+    act(() => {
+      fireEvent.click(btn);
+    });
+    const socket = lastConnect.socket!;
+    act(() => {
+      socket.fireServer("connect");
+    });
+    const joinCall = socket.emitCalls.find((c) => c.ev === "room:join")!;
+    // Never ack.
+
+    // The no-ack is a SILENT failure today: no server-down pill, no error state.
+    // `fluxStatus` stays `idle` — `handleConnect` sets `idle` when `joined` is
+    // still false (the join ack would have flipped it to `waiting`, but it
+    // never fired). Pinning the current (silent) value so a future fix is
+    // visible.
+    expect(useListenerStore.getState().fluxStatus).not.toBe("server-down");
+    expect(useListenerStore.getState().fluxStatus).toBe("idle");
+    expect(useListenerStore.getState().joined).toBe(false);
+  });
+
+  // --- G2 — double-click reentrance characterization (NOT yet guarded) --------
+  // `joining` is dead in prod and `joined` stays false until the `room:join`
+  // ack fires, so two rapid clicks on « Rejoindre » can emit TWO `room:join`
+  // before the first ack. The server is idempotent (RoomService Set), so this
+  // is harmless today. These tests pin the CURRENT reentrance so a future
+  // in-flight guard is an intentional change. They add NO guard, NO timeout,
+  // and do NOT use `joining` to block the second click.
+
+  it("double-click before ack emits room:join twice (current reentrance, not yet guarded)", () => {
+    renderButton();
+    const btn = screen.getByTestId("listener-join-button");
+    act(() => {
+      fireEvent.click(btn); // 1st click → ensureListenerSocket + emit room:join #1
+    });
+    const socket = lastConnect.socket!;
+    act(() => {
+      socket.fireServer("connect"); // handleConnect (joined still false → idle)
+    });
+
+    // No ack yet — `joined` is still false, so there is NO in-flight guard.
+    act(() => {
+      fireEvent.click(btn); // 2nd click → same socket (socketRef reused) → room:join #2
+    });
+
+    const joins = socket.emitCalls.filter((c) => c.ev === "room:join");
+    expect(joins).toHaveLength(2);
+    // Both emits carry an ack callback (the server may call either, or none).
+    expect(joins[0].ack).toBeTypeOf("function");
+    expect(joins[1].ack).toBeTypeOf("function");
+
+    // Still un-joined before any ack; `joining` untouched (not wired).
+    expect(useListenerStore.getState().joined).toBe(false);
+    expect(useListenerStore.getState().joining).toBe(false);
+  });
+
+  it("ack after duplicate join keeps final state joined once (current reentrance, stable)", () => {
+    renderButton();
+    const btn = screen.getByTestId("listener-join-button");
+    act(() => {
+      fireEvent.click(btn);
+    });
+    const socket = lastConnect.socket!;
+    act(() => {
+      socket.fireServer("connect");
+    });
+    act(() => {
+      fireEvent.click(btn); // 2nd click before any ack → room:join #2
+    });
+    const joins = socket.emitCalls.filter((c) => c.ev === "room:join");
+    expect(joins).toHaveLength(2);
+
+    // First ack → `joined` flips to true, button → « Quitter le flux ».
+    act(() => {
+      joins[0].ack!({ ok: true });
+    });
+    expect(useListenerStore.getState().joined).toBe(true);
+    expect(useListenerStore.getState().joining).toBe(false);
+    expect(screen.getByTestId("listener-join-button")).toHaveTextContent(
+      "Quitter le flux",
+    );
+
+    // Second ack arrives later — state stays STABLE: `joined` already true
+    // (the ack callback just re-sets joined=true + fluxStatus="waiting" +
+    // resetAnchor, all idempotent). No double transition, no error.
+    act(() => {
+      joins[1].ack!({ ok: true });
+    });
+    expect(useListenerStore.getState().joined).toBe(true);
+    expect(useListenerStore.getState().joining).toBe(false);
+    expect(screen.getByTestId("listener-join-button")).toHaveTextContent(
+      "Quitter le flux",
+    );
+  });
+
   it("clicking « Quitter le flux » emits room:leave, flips joined false, disconnects", () => {
     renderButton();
     const btn = screen.getByTestId("listener-join-button") as HTMLButtonElement;
