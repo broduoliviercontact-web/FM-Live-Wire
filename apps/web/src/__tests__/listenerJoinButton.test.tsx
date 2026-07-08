@@ -186,6 +186,64 @@ describe("JoinButton — join / leave with an output selected", () => {
     expect(useListenerStore.getState().joining).toBe(false);
   });
 
+  // --- G1 — no-ack join characterization (silent failure, NOT yet fixed) -------
+  // `emitRoomJoin(socket, ack)` has NO client-side timeout. If the server never
+  // calls the ack (mid-flight disconnect, middleware drop, server crash), the
+  // join flow stays SILENT: nothing flips `joined`, no error state, the button
+  // keeps offering « Rejoindre ». These tests pin that current behaviour so a
+  // future timeout / error UI is an intentional change, not a silent drift.
+  // They do NOT add a timeout, do NOT add an error message, do NOT change any
+  // user-facing behaviour.
+
+  it("room:join WITHOUT ack leaves the listener un-joined (silent failure, not yet fixed)", () => {
+    renderButton();
+    const btn = screen.getByTestId("listener-join-button");
+    act(() => {
+      fireEvent.click(btn);
+    });
+    const socket = lastConnect.socket!;
+    act(() => {
+      socket.fireServer("connect"); // handleConnect (joined still false → idle)
+    });
+    const joinCall = socket.emitCalls.find((c) => c.ev === "room:join")!;
+    // `room:join` was emitted WITH an ack callback — the server just never
+    // calls it (the no-ack scenario).
+    expect(joinCall.ack).toBeTypeOf("function");
+
+    // DELIBERATELY never call `joinCall.ack(...)`.
+
+    const s = useListenerStore.getState();
+    expect(s.joined).toBe(false);
+    expect(s.joining).toBe(false); // not wired (Phase F characterization)
+    // Button stays « Rejoindre le flux » — no false « Quitter » state.
+    expect(screen.getByTestId("listener-join-button")).toHaveTextContent(
+      "Rejoindre le flux",
+    );
+  });
+
+  it("room:join WITHOUT ack stays silent — NO server-down (characterization, not yet fixed)", () => {
+    renderButton();
+    const btn = screen.getByTestId("listener-join-button");
+    act(() => {
+      fireEvent.click(btn);
+    });
+    const socket = lastConnect.socket!;
+    act(() => {
+      socket.fireServer("connect");
+    });
+    const joinCall = socket.emitCalls.find((c) => c.ev === "room:join")!;
+    // Never ack.
+
+    // The no-ack is a SILENT failure today: no server-down pill, no error state.
+    // `fluxStatus` stays `idle` — `handleConnect` sets `idle` when `joined` is
+    // still false (the join ack would have flipped it to `waiting`, but it
+    // never fired). Pinning the current (silent) value so a future fix is
+    // visible.
+    expect(useListenerStore.getState().fluxStatus).not.toBe("server-down");
+    expect(useListenerStore.getState().fluxStatus).toBe("idle");
+    expect(useListenerStore.getState().joined).toBe(false);
+  });
+
   it("clicking « Quitter le flux » emits room:leave, flips joined false, disconnects", () => {
     renderButton();
     const btn = screen.getByTestId("listener-join-button") as HTMLButtonElement;
