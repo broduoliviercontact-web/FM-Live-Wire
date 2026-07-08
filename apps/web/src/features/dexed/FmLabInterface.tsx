@@ -3,11 +3,12 @@
 // Composes the FM patch model UI (presets, globals, algorithm, operator grid,
 // operator detail) and renders the existing fallback synth panel below it.
 //
-// IMPORTANT: this lot is UI/MODEL-FIRST. None of the FM patch parameters are
-// wired to the audio graph yet — the only sound comes from the fallback
-// oscillator+filter (FmLabPanel), unchanged. The "Dexed WAM non chargé" alert
-// stays (DexedHost). This panel is "FM Lab — custom interface", NOT a real
-// Dexed UI, and no Dexed/WASM asset is used.
+// IMPORTANT: this lot wires a REAL 2-operator FM engine (OP1 carrier, OP2
+// modulator) to the patch model when engineMode is "fm2op". In "fallback"
+// mode the only sound comes from the fallback oscillator+filter (FmLabPanel).
+// OP3-OP6 remain UI/model-only in both modes (clearly labeled below). The
+// "Dexed WAM non chargé" alert stays (DexedHost). This panel is "FM Lab —
+// custom interface", NOT a real Dexed UI, and no Dexed/WASM asset is used.
 
 import { Card, CardContent, CardHeader, CardTitle } from "../../shared/ui/card";
 import { FmLabPanel, type SynthParams } from "./FmLabPanel";
@@ -17,13 +18,17 @@ import { OperatorPanel } from "./OperatorPanel";
 import { PresetPanel } from "./PresetPanel";
 import { RangeControl } from "./RangeControl";
 import { updateOperator, updatePatch, type FmPatch } from "./fmPatch";
+import { type EngineMode } from "./fmEngine";
 
 interface FmLabInterfaceProps {
   readonly patch: FmPatch;
   readonly onPatchChange: (patch: FmPatch) => void;
   readonly selectedOp: number;
   readonly onSelectOp: (index: number) => void;
-  /** Fallback synth controls (these still act on the sound). */
+  /** Which audio engine is active ("fallback" | "fm2op"). */
+  readonly engineMode: EngineMode;
+  readonly onEngineModeChange: (mode: EngineMode) => void;
+  /** Fallback synth controls (these act on the sound only in "fallback" mode). */
   readonly fallbackParams: SynthParams;
   readonly onFallbackChange: (partial: Partial<SynthParams>) => void;
 }
@@ -33,11 +38,14 @@ export function FmLabInterface({
   onPatchChange,
   selectedOp,
   onSelectOp,
+  engineMode,
+  onEngineModeChange,
   fallbackParams,
   onFallbackChange,
 }: FmLabInterfaceProps) {
   const op = patch.operators[selectedOp] ?? patch.operators[0];
   if (op === undefined) return null;
+  const fm2op = engineMode === "fm2op";
   return (
     <>
       <Card>
@@ -46,11 +54,34 @@ export function FmLabInterface({
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <p className="text-sm text-muted-foreground">
-            Modèle de patch FM 6 opérateurs — interface uniquement, pas encore
-            connectée au moteur audio. Le son actif reste le fallback ci-dessous
-            (« FM Lab controls — fallback only »). Aucun asset Dexed/WASM chargé
-            (alerte « Dexed WAM non chargé »).
+            Modèle de patch FM 6 opérateurs. En mode « FM 2-op preview »,
+            OP1 (porteur) et OP2 (modulateur) pilotent un vrai moteur FM maison ;
+            OP3-OP6 restent UI uniquement dans tous les modes. Aucun asset
+            Dexed/WASM chargé (alerte « Dexed WAM non chargé »).
           </p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-2 text-xs">
+              <span className="text-muted-foreground">Engine mode</span>
+              <select
+                className="rounded-md border border-input bg-background px-2 py-1 text-xs"
+                value={engineMode}
+                onChange={(e) => onEngineModeChange(e.target.value as EngineMode)}
+              >
+                <option value="fallback">Fallback synth</option>
+                <option value="fm2op">FM 2-op preview</option>
+              </select>
+            </label>
+            {fm2op ? (
+              <span className="text-xs text-muted-foreground">
+                FM 2-op preview — OP1 carrier, OP2 modulator. OP3-OP6 UI-only.
+              </span>
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                Fallback synth actif — contrôles FM OP1/OP2 UI/model uniquement.
+              </span>
+            )}
+          </div>
 
           <PresetPanel patch={patch} onPatchChange={onPatchChange} />
 
@@ -153,6 +184,12 @@ export function FmLabInterface({
         </CardContent>
       </Card>
 
+      {fm2op ? (
+        <p className="text-xs text-muted-foreground">
+          Le panneau « FM Lab controls — fallback only » ci-dessous est inactif
+          en mode FM 2-op preview (il ne pilote le son qu'en mode Fallback synth).
+        </p>
+      ) : null}
       <FmLabPanel params={fallbackParams} onChange={onFallbackChange} />
     </>
   );

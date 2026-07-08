@@ -26,6 +26,7 @@ import { InfoIcon } from "../../shared/ui/icons";
 import { FmLabInterface } from "./FmLabInterface";
 import { type SynthParams } from "./FmLabPanel";
 import { DEFAULT_PATCH, type FmPatch } from "./fmPatch";
+import { Fm2OpEngine, type EngineMode } from "./fmEngine";
 import { MidiInputSelector } from "./MidiInputSelector";
 import { MidiMonitor, type MonitorEntry } from "./MidiMonitor";
 import { noteName } from "./notes";
@@ -67,10 +68,14 @@ export function DexedHost({ audioContext }: DexedHostProps) {
   const [octave, setOctave] = useState(4);
   const [monitor, setMonitor] = useState<MonitorEntry[]>([]);
   const [panicNonce, setPanicNonce] = useState(0);
-  // FM patch model (lot 3) — UI/model-only this lot; not wired to the audio
-  // graph. The fallback synth (SynthParams above) still produces the sound.
+  // FM patch model (lot 3) — drives the 2-op FM engine (lot 4A) when engineMode
+  // is "fm2op"; UI/model-only otherwise. The fallback synth (SynthParams above)
+  // still produces the sound in "fallback" mode (default).
   const [fmPatch, setFmPatch] = useState<FmPatch>(DEFAULT_PATCH);
   const [selectedOp, setSelectedOp] = useState(0);
+  // Engine mode: "fallback" (osc+filter) or "fm2op" (real 2-op FM). Default
+  // "fallback" to minimize risk; switching lazily creates the FM engine.
+  const [engineMode, setEngineMode] = useState<EngineMode>("fallback");
 
   const masterRef = useRef<GainNode | null>(null);
   const filterRef = useRef<BiquadFilterNode | null>(null);
@@ -78,6 +83,11 @@ export function DexedHost({ audioContext }: DexedHostProps) {
   const heldComputerRef = useRef<Set<number>>(new Set());
   const paramsRef = useRef<SynthParams>(params);
   const monitorIdRef = useRef(0);
+  // FM engine (lot 4A) — created on first switch to "fm2op". Holds a ref so
+  // the stable noteOn/noteOff can route to it without rebuilding.
+  const engineRef = useRef<Fm2OpEngine | null>(null);
+  const engineModeRef = useRef<EngineMode>("fallback");
+  const fmPatchRef = useRef<FmPatch>(fmPatch);
 
   // --- Audio graph (created once for this context). --------------------------
   // Chain: osc -> voiceGain (envelope) -> filter (shared lowpass) -> master
@@ -114,6 +124,32 @@ export function DexedHost({ audioContext }: DexedHostProps) {
     if (m) m.gain.value = params.gain;
   }, [params.gain]);
 
+  // --- FM 2-op engine (lot 4A) ------------------------------------------------
+  // Lazily create the engine on first use; keep it in a ref so the stable
+  // noteOn/noteOff can route to it without rebuilding (and without re-binding
+  // the MIDI handler) on every patch tweak.
+  const getEngine = useCallback((): Fm2OpEngine => {
+    if (engineRef.current === null) {
+      engineRef.current = new Fm2OpEngine(audioContext, fmPatchRef.current);
+    }
+    return engineRef.current;
+  }, [audioContext]);
+
+  // Push patch edits to the engine (master gain + held-voice frequencies).
+  useEffect(() => {
+    fmPatchRef.current = fmPatch;
+    engineRef.current?.updatePatch(fmPatch);
+  }, [fmPatch]);
+
+  // Dispose the FM engine on unmount (the fallback voices are torn down by
+  // the separate effect below).
+  useEffect(() => {
+    return () => {
+      engineRef.current?.dispose();
+      engineRef.current = null;
+    };
+  }, []);
+
   // --- Fallback synth (STAND-IN for the Dexed WAM). --------------------------
   // dexedWamInsertionPoint: a real Dexed WAM AudioWorklet node would replace
   // this oscillator+gain+filter voice with the msfa engine (see
@@ -121,6 +157,12 @@ export function DexedHost({ audioContext }: DexedHostProps) {
   // only — they are not Dexed parameters.
   const noteOn = useCallback(
     (note: number, velocity: number) => {
+      // Route to the real 2-op FM engine when in "fm2op" mode; otherwise the
+      // fallback oscillator+filter synth below.
+      if (engineModeRef.current === "fm2op") {
+        getEngine().noteOn(note, velocity);
+        return;
+      }
       if (voicesRef.current.has(note)) return; // retrigger guard (monophonic-per-note)
       const p = paramsRef.current;
       const ctx = audioContext;
@@ -138,11 +180,15 @@ export function DexedHost({ audioContext }: DexedHostProps) {
       osc.start();
       voicesRef.current.set(note, { osc, gain });
     },
-    [audioContext, filter],
+    [audioContext, filter, getEngine],
   );
 
   const noteOff = useCallback(
     (note: number) => {
+      if (engineModeRef.current === "fm2op") {
+        getEngine().noteOff(note);
+        return;
+      }
       const v = voicesRef.current.get(note);
       if (!v) return;
       const p = paramsRef.current;
@@ -155,19 +201,37 @@ export function DexedHost({ audioContext }: DexedHostProps) {
       v.osc.stop(now + rel + 0.05);
       voicesRef.current.delete(note);
     },
-    [audioContext],
+    [audioContext, getEngine],
   );
 
-  // Panic / all notes off — releases every sounding voice and clears the
-  // computer-keyboard held set, then bumps `panicNonce` so the virtual
-  // keyboard clears its own held set. Used by the Panic button AND by every
-  // octave change (so a shift never leaves a stuck note behind).
+  // Panic / all notes off — releases every sounding voice (from whichever
+  // engine is active) and clears the computer-keyboard held set, then bumps
+  // `panicNonce` so the virtual keyboard clears its own held set. Used by the
+  // Panic button, every octave change, and engine-mode switches.
   const allNotesOff = useCallback(() => {
-    const notes = [...voicesRef.current.keys()];
-    notes.forEach((n) => noteOff(n));
+    if (engineModeRef.current === "fm2op") {
+      engineRef.current?.allNotesOff();
+    } else {
+      const notes = [...voicesRef.current.keys()];
+      notes.forEach((n) => noteOff(n));
+    }
     heldComputerRef.current.clear();
     setPanicNonce((n) => n + 1);
   }, [noteOff]);
+
+  // Switch engine mode. `allNotesOff` is routed by the CURRENT ref value (the
+  // engine we are leaving), so it cleanly releases whichever engine is active
+  // before we flip the ref and (lazily) create the FM engine if entering it.
+  const changeEngineMode = useCallback(
+    (mode: EngineMode) => {
+      if (mode === engineModeRef.current) return;
+      allNotesOff();
+      if (mode === "fm2op") getEngine();
+      engineModeRef.current = mode;
+      setEngineMode(mode);
+    },
+    [allNotesOff, getEngine],
+  );
 
   const shiftOctave = useCallback(
     (delta: number) => {
@@ -248,9 +312,10 @@ export function DexedHost({ audioContext }: DexedHostProps) {
         <AlertTitle>Dexed WAM non chargé</AlertTitle>
         <AlertDescription>
           Aucun asset WASM Dexed n'est vendu dans ce dépôt (licence GPL-3.0 à
-          vérifier — voir NOTICE.md). Synthèse de fallback (oscillateur + filtre)
-          pour tester le note on/off et les contrôles FM Lab. Le point
-          d'insertion du vrai WAM est marqué dans <code>DexedHost.tsx</code>.
+          vérifier — voir NOTICE.md). Deux moteurs maison : un fallback
+          (oscillateur + filtre) et un moteur FM 2-opérations (OP1 porteur, OP2
+          modulateur). Aucun des deux n'est le vrai Dexed. Le point d'insertion
+          du vrai WAM est marqué dans <code>DexedHost.tsx</code>.
         </AlertDescription>
       </Alert>
 
@@ -359,6 +424,8 @@ export function DexedHost({ audioContext }: DexedHostProps) {
         onPatchChange={setFmPatch}
         selectedOp={selectedOp}
         onSelectOp={setSelectedOp}
+        engineMode={engineMode}
+        onEngineModeChange={changeEngineMode}
         fallbackParams={params}
         onFallbackChange={(patch) => setParams((prev) => ({ ...prev, ...patch }))}
       />
