@@ -120,7 +120,7 @@ export function DexedLabPage() {
 
       {!caps.hasAudioContext ? (
         <Alert variant="danger">
-          <DangerIcon />
+          <DangerIcon className="size-5" />
           <AlertTitle>AudioContext indisponible</AlertTitle>
           <AlertDescription>
             Ce navigateur ne supporte pas l'AudioContext Web Audio. Le spike ne
@@ -131,7 +131,7 @@ export function DexedLabPage() {
 
       {!caps.hasWebMidi && caps.isSafari ? (
         <Alert variant="late">
-          <DangerIcon />
+          <DangerIcon className="size-5" />
           <AlertTitle>MIDI non supporté</AlertTitle>
           <AlertDescription>
             Safari ne supporte pas le Web MIDI API. Un contrôleur MIDI USB ne
@@ -174,9 +174,9 @@ function CapabilityRow({ ok, label }: { ok: boolean; label: string }) {
   return (
     <div className="flex items-center gap-2 text-sm">
       {ok ? (
-        <CheckIcon className="text-connected" />
+        <CheckIcon className="size-5 shrink-0 text-connected" />
       ) : (
-        <DangerIcon className="text-danger" />
+        <DangerIcon className="size-5 shrink-0 text-danger" />
       )}
       <span className={ok ? "" : "text-danger"}>{label}</span>
       <Badge variant={ok ? "connected" : "error"}>

@@ -146,7 +146,7 @@ export function DexedHost({ audioContext }: DexedHostProps) {
   return (
     <div className="flex flex-col gap-4">
       <Alert variant="info">
-        <InfoIcon />
+        <InfoIcon className="size-5" />
         <AlertTitle>Dexed WAM non chargé</AlertTitle>
         <AlertDescription>
           Aucun asset WASM Dexed n'est vendu dans ce dépôt (licence GPL-3.0 à
