@@ -23,7 +23,9 @@ import { Badge } from "../../shared/ui/badge";
 import { Button } from "../../shared/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../shared/ui/card";
 import { InfoIcon } from "../../shared/ui/icons";
-import { FmLabPanel, type SynthParams } from "./FmLabPanel";
+import { FmLabInterface } from "./FmLabInterface";
+import { type SynthParams } from "./FmLabPanel";
+import { DEFAULT_PATCH, type FmPatch } from "./fmPatch";
 import { MidiInputSelector } from "./MidiInputSelector";
 import { MidiMonitor, type MonitorEntry } from "./MidiMonitor";
 import { noteName } from "./notes";
@@ -65,6 +67,10 @@ export function DexedHost({ audioContext }: DexedHostProps) {
   const [octave, setOctave] = useState(4);
   const [monitor, setMonitor] = useState<MonitorEntry[]>([]);
   const [panicNonce, setPanicNonce] = useState(0);
+  // FM patch model (lot 3) — UI/model-only this lot; not wired to the audio
+  // graph. The fallback synth (SynthParams above) still produces the sound.
+  const [fmPatch, setFmPatch] = useState<FmPatch>(DEFAULT_PATCH);
+  const [selectedOp, setSelectedOp] = useState(0);
 
   const masterRef = useRef<GainNode | null>(null);
   const filterRef = useRef<BiquadFilterNode | null>(null);
@@ -348,9 +354,13 @@ export function DexedHost({ audioContext }: DexedHostProps) {
         </CardContent>
       </Card>
 
-      <FmLabPanel
-        params={params}
-        onChange={(patch) => setParams((prev) => ({ ...prev, ...patch }))}
+      <FmLabInterface
+        patch={fmPatch}
+        onPatchChange={setFmPatch}
+        selectedOp={selectedOp}
+        onSelectOp={setSelectedOp}
+        fallbackParams={params}
+        onFallbackChange={(patch) => setParams((prev) => ({ ...prev, ...patch }))}
       />
     </div>
   );
