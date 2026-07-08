@@ -10,6 +10,8 @@ import { BrowserCompatGate } from "./components/BrowserCompatGate";
 import { MidiPermissionButton } from "./components/MidiPermissionButton";
 import { MidiPortPicker } from "./components/MidiPortPicker";
 import { ChannelSelector } from "./components/ChannelSelector";
+import { CcModeSelector } from "./components/CcModeSelector";
+import { CcDebugStats } from "./components/CcDebugStats";
 import { JoinButton } from "./components/JoinButton";
 import { TestNoteButton } from "./components/TestNoteButton";
 import { StatusPill } from "./components/StatusPill";
@@ -90,6 +92,11 @@ export function ListenerPanel() {
               self-toggle like the performer's input picker. */}
           <MidiPortPicker />
           <ChannelSelector />
+          {/* CC rate-limiter / coalescer mode (Raw / Smooth / Safe). Self-gates
+              on `status === "ready"` (like `ChannelSelector`). Smooth 60 Hz is
+              the default — tames a CC74 deluge without saturating the synth.
+              NOTES are unaffected; the preference persists across leave. */}
+          <CcModeSelector />
           {/* Story 4.3 — join/leave + live reception → remap → encode → send. */}
           <JoinButton />
           {/* Story 4.4 — local test note + flux status + activity indicator. */}
@@ -132,6 +139,10 @@ export function ListenerPanel() {
               Exporter timings CSV
             </button>
           )}
+          {/* CC coalescer debug counters — DEBUG-ONLY (`?debugTiming=1`),
+              mirrors the CSV export button above. Shows CC reçus / envoyés /
+              coalescés so an operator can verify the throttle is coalescing. */}
+          {isTimingDebugEnabled() && <CcDebugStats />}
           {/* Story 5.4 — backpressure UI: a LOCAL late/overload alert (FR-27,
               UX-DR14) + an alerte-only latency stat (UX-DR12). Both self-gate
               on `lateWarning` (null on calm reception), so mounting them

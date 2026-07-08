@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { CcMode } from "../lib/cc-coalescer";
 
 // Story 4.2 — listener UI store (AD-6: Zustand, no TanStack Query).
 //
@@ -134,6 +135,19 @@ export interface ListenerState {
    * fail-safe (scheduler stopped). Cleared on a new non-null output selection.
    */
   readonly outputLost: boolean;
+  /**
+   * CC rate-limiter / coalescer mode (Smooth 60 Hz default, Safe 30 Hz, Raw
+   * bypass). A PREFERENCE (like `channel`) — lives in `INITIAL` only, so it
+   * PERSISTS across leave/rejoin (not reset by `resetFlux`); reset only on full
+   * `reset()` (test isolation / fresh mount).
+   */
+  readonly ccMode: CcMode;
+  /** CC received from the performer this session (incremented in `handleMidiEvent` for every `controlChange`). Session telemetry (resets on leave). */
+  readonly ccReceived: number;
+  /** CC actually forwarded to the raw MIDIOutput (coalescer `onSent`). Session telemetry (resets on leave). */
+  readonly ccSent: number;
+  /** CC dropped / replaced (coalescer `onCoalesced`). Session telemetry (resets on leave). */
+  readonly ccCoalesced: number;
   /** Select an output by id, or pass null to clear. Story 5.5: a non-null id
    *  also clears the `outputLost` E5 alert (the listener picked a new sortie). */
   readonly setSelectedOutput: (id: string | null) => void;
@@ -161,6 +175,14 @@ export interface ListenerState {
   readonly incDropped: () => void;
   /** Story 5.5 — set / clear the E5 output-lost flag (AD-17, AC-U9). */
   readonly setOutputLost: (b: boolean) => void;
+  /** Set the CC coalescer mode (Raw / Smooth / Safe). Preference — persists across leave. */
+  readonly setCcMode: (mode: CcMode) => void;
+  /** Increment the CC-received counter (called in `handleMidiEvent` for `controlChange`). */
+  readonly incCcReceived: () => void;
+  /** Increment the CC-sent counter (coalescer `onSent`). */
+  readonly incCcSent: () => void;
+  /** Increment the CC-coalesced counter (coalescer `onCoalesced`). */
+  readonly incCcCoalesced: () => void;
   /** Reset the flux to idle: status idle, counters 0 (Story 4.4 leave). */
   readonly resetFlux: () => void;
   /** Reset to defaults (test isolation + fresh mount). */
@@ -181,6 +203,10 @@ const INITIAL = {
   fallbackCount: 0,
   droppedCount: 0,
   outputLost: false,
+  ccMode: "smooth" as CcMode,
+  ccReceived: 0,
+  ccSent: 0,
+  ccCoalesced: 0,
 } as const;
 
 const FLUX_IDLE = {
@@ -193,6 +219,9 @@ const FLUX_IDLE = {
   fallbackCount: 0,
   droppedCount: 0,
   outputLost: false,
+  ccReceived: 0,
+  ccSent: 0,
+  ccCoalesced: 0,
 } as const;
 
 export const useListenerStore = create<ListenerState>((set) => ({
@@ -214,6 +243,10 @@ export const useListenerStore = create<ListenerState>((set) => ({
   incFallback: () => set((s) => ({ fallbackCount: s.fallbackCount + 1 })),
   incDropped: () => set((s) => ({ droppedCount: s.droppedCount + 1 })),
   setOutputLost: (b) => set({ outputLost: b }),
+  setCcMode: (mode) => set({ ccMode: mode }),
+  incCcReceived: () => set((s) => ({ ccReceived: s.ccReceived + 1 })),
+  incCcSent: () => set((s) => ({ ccSent: s.ccSent + 1 })),
+  incCcCoalesced: () => set((s) => ({ ccCoalesced: s.ccCoalesced + 1 })),
   resetFlux: () => set(FLUX_IDLE),
   reset: () => set(INITIAL),
 }));

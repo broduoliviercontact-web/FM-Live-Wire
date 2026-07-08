@@ -22,6 +22,8 @@ import {
 } from "../lib/active-notes";
 import { sendLocalPanic } from "../lib/panic";
 import { sendForcePanic } from "../lib/force-panic";
+import { createCcCoalescer, type CcMode } from "../lib/cc-coalescer";
+import { CC_RATE_HZ_NORMAL, CC_RATE_HZ_SAFE } from "../../../config/runtime";
 import { logListenerSchedule } from "../../../lib/timing-debug";
 
 // Story 4.4 / 4.5 — shared listener Socket.IO connection (AD-10, AD-11, AD-12,
@@ -102,6 +104,40 @@ const listenerScheduler = createMidiScheduler({
  * safety paths + `__resetListenerConnection` (test isolation). See `lib/active-notes`.
  */
 const activeNoteTracker = createActiveNoteTracker();
+
+/**
+ * CC rate-limiter / coalescer — min ms between forwards on the same
+ * (channel, controller) key, derived from the current mode. Smooth 60 Hz →
+ * ~17 ms, Safe 30 Hz → ~33 ms. Raw does not throttle (the coalescer forwards
+ * every CC), so this value is unused in raw. 60/30 Hz are synth-friendly
+ * safety ceilings (NOT the MIDI DIN cable limit) — see `config/runtime.ts`.
+ */
+function ccMinIntervalMs(): number {
+  const mode = useListenerStore.getState().ccMode;
+  if (mode === "safe") return Math.round(1000 / CC_RATE_HZ_SAFE);
+  return Math.round(1000 / CC_RATE_HZ_NORMAL); // smooth (raw unused)
+}
+
+/**
+ * CC rate-limiter / coalescer — module singleton (like `listenerScheduler`).
+ * Wraps the live `midi:event` output so the scheduler forwards CC density-
+ * reduced (Smooth 60 Hz / Safe 30 Hz / Raw bypass), preserving the deferred
+ * `targetLocalMs` (~1.5 s future). Notes / pitch bend / bypass CC
+ * (64/120/121/123) pass through immediately; Panic / Force Panic / anti-stuck-
+ * notes / output-lost / port-change / channel-change call the RAW output
+ * directly → they bypass the scheduler AND this wrapper, so they are never
+ * delayed nor filtered. `ccReceived` is incremented in `handleMidiEvent` for
+ * every `controlChange` (NOT here — no double counting); this singleton reports
+ * only `onSent` (CC forwarded to the raw MIDIOutput) / `onCoalesced` (CC
+ * dropped/replaced). `reset()` on port/channel/output-lost/leave/test; `flush()`
+ * before a mode change (preserves the last value).
+ */
+const ccCoalescer = createCcCoalescer({
+  getMode: () => useListenerStore.getState().ccMode,
+  getMinIntervalMs: ccMinIntervalMs,
+  onSent: () => useListenerStore.getState().incCcSent(),
+  onCoalesced: () => useListenerStore.getState().incCcCoalesced(),
+});
 
 /**
  * Hotfix fidélité musicale — best-effort cancel all PENDING SCHEDULED sends on
@@ -205,6 +241,7 @@ export function handleOutputLost(): void {
     activeNoteTracker.clearOutput(oldId);
   }
   listenerScheduler.stop(); // also clears the deferred anchor
+  ccCoalescer.reset(); // drop held CC pending (no flush to a dead port)
   if (oldId !== null) store.setSelectedOutput(null);
   store.setOutputLost(true);
 }
@@ -268,6 +305,11 @@ function handleMidiEvent(event: MidiEvent): void {
   // event received with no output selected still counts as received.
   store.incEventsReceived();
   if (event.type === "noteOn") store.pulseNoteOn();
+  // CC rate-limiter — count CC received from the performer (every
+  // `controlChange`, including bypass 64/120/121/123). The coalescer does NOT
+  // increment this (no double counting); `ccSent`/`ccCoalesced` come from its
+  // `onSent`/`onCoalesced` callbacks.
+  if (event.type === "controlChange") store.incCcReceived();
   store.setFluxStatus("active");
   // Story 4.3 pipeline + Story 5.4 backpressure: remap → encode → schedule on
   // the selected raw output (real `MIDIOutput` or the Story 5.1 Mock singleton
@@ -277,8 +319,15 @@ function handleMidiEvent(event: MidiEvent): void {
   if (outputId === null) return;
   const getOutput = getOutputRef;
   if (getOutput === null) return;
-  const output = getOutput(outputId);
-  if (output === null) return; // selected output gone (hot-unplug) → skip
+  const rawOutput = getOutput(outputId);
+  if (rawOutput === null) return; // selected output gone (hot-unplug) → skip
+  // CC rate-limiter / coalescer — wrap the raw output so the scheduler forwards
+  // CC density-reduced (Smooth 60 Hz / Safe 30 Hz / Raw bypass). Notes / pitch
+  // bend / bypass CC (64/120/121/123) pass through immediately; the deferred
+  // `targetLocalMs` (~1.5 s) is preserved through the wrapper — only the CC
+  // RATE is limited, not the note timing. Panic / safety paths call the RAW
+  // output directly → unaffected.
+  const output = ccCoalescer.wrap(rawOutput);
   const bytes = encodeForOutput(event, store.channel);
   // Story 5.4 — bounded buffer + per-type late fallback/drop. `srvTs` is an
   // optional server-added envelope field (telemetry only, AD-11) stamped as
@@ -469,6 +518,7 @@ export function leaveFlux(): void {
     // output, then stop the scheduler (clean idle, no in-flight bytes).
     sendSafetyPanicOnCurrentOutput();
     listenerScheduler.stop();
+    ccCoalescer.reset(); // drop held CC pending (clean idle)
     s.setJoined(false);
     s.resetFlux();
     return;
@@ -486,6 +536,7 @@ export function leaveFlux(): void {
     // in-flight bytes). `resetFlux` already cleared the 5.4 telemetry; the
     // pending buffer is reset to factory on the next `start()` (rejoin).
     listenerScheduler.stop();
+    ccCoalescer.reset(); // drop held CC pending (clean idle)
     intentionalClose = true; // voluntary leave → no server-down on disconnect
     socket.disconnect();
     socketRef = null;
@@ -523,6 +574,7 @@ export function leaveListenerForNavigation(): void {
     // resolvable here). Then forget all active notes.
     sendSafetyPanicOnCurrentOutput();
     listenerScheduler.stop();
+    ccCoalescer.reset(); // drop held CC pending (navigation away)
     intentionalClose = true; // voluntary → no server-down pill on the disconnect
     socket.disconnect();
     socketRef = null;
@@ -532,6 +584,7 @@ export function leaveListenerForNavigation(): void {
     // all-notes-off on navigation); clears the tracker regardless.
     sendSafetyPanicOnCurrentOutput();
     listenerScheduler.stop();
+    ccCoalescer.reset(); // drop held CC pending (navigation away)
   }
   store.setJoined(false);
   store.resetFlux();
@@ -605,6 +658,8 @@ export function selectListenerOutput(
     // the first event on the new output re-anchors. The NEW output gets no
     // safety bytes (nothing was ever sent to it yet).
     listenerScheduler.resetAnchor();
+    // Drop held CC pending for the OLD output so it cannot flush to the NEW one.
+    ccCoalescer.reset();
   }
   store.setSelectedOutput(newId);
 }
@@ -649,6 +704,9 @@ export function changeListenerChannel(
   }
   // A channel change starts a fresh musical session: reset the deferred anchor.
   listenerScheduler.resetAnchor();
+  // Drop held CC pending (per-key state includes the channel) so a pending CC
+  // for the OLD channel cannot flush onto the NEW one.
+  ccCoalescer.reset();
   store.setChannel(newChannel);
 }
 
@@ -776,4 +834,18 @@ export function __resetListenerConnection(): void {
   intentionalClose = false;
   listenerScheduler.reset(); // Story 5.4 — clear the pending buffer between tests
   activeNoteTracker.clearAll(); // Anti-stuck-notes — clear the tracker between tests
+  ccCoalescer.reset(); // CC coalescer — drop held pending between tests
+}
+
+/**
+ * CC rate-limiter / coalescer — switch the mode (Raw / Smooth / Safe). Flushes
+ * held pending FIRST (so the last received CC value reaches the synth under the
+ * OLD mode before the new one applies), then sets the store preference. Mirrors
+ * `changeListenerChannel` (a safety flush before the new choice takes effect).
+ * LOCAL: no socket event. The preference persists across leave/rejoin (it lives
+ * in `INITIAL`, not `FLUX_IDLE`).
+ */
+export function setListenerCcMode(mode: CcMode): void {
+  ccCoalescer.flush(); // preserve the last CC value before the new mode applies
+  useListenerStore.getState().setCcMode(mode);
 }
